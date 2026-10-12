@@ -27,7 +27,6 @@ import org.graalvm.polyglot.PolyglotAccess;
 import org.graalvm.polyglot.proxy.ProxyObject;
 import org.graalvm.polyglot.io.FileSystem;
 import org.graalvm.polyglot.io.FileSystem.Selector;
-import com.oracle.truffle.polyglot.FileSystems;
 
 import java.io.IOException;
 import java.util.*;
@@ -83,8 +82,12 @@ public abstract class ScriptHolderBase {
 
         boolean trust = false;
 
-        final FileSystem defFileSystem = FileSystems.newDefaultFileSystem("./ante/script_data/");
+        // [续更修复] GraalVM 24.x 起 com.oracle.truffle.polyglot.FileSystems 不再是公共 API
+        // （作者在 22.3.0/23.x/24.2.x 间反复尝试均编译不过），改用公开 API 实现的
+        // RootedScriptFileSystem：语义与原内部 newDefaultFileSystem(root) 一致，
+        // 以 ./ante/script_data/ 为根的沙箱（相对路径锚定根目录、拒绝越界与符号链接逃逸）
         final Path basicFolder = Path.of("./ante/script_data/").toAbsolutePath().normalize();
+        final FileSystem defFileSystem = new RootedScriptFileSystem(basicFolder);
 
         context = Context.newBuilder("js")  
             .allowNativeAccess(false)

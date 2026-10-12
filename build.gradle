@@ -4,7 +4,7 @@ import java.time.Instant
 
 plugins {
 	id "architectury-plugin" version "3.4.160"
-	id "dev.architectury.loom" version "1.9.424" apply false
+	id "dev.architectury.loom" version "1.10.431" apply false
 	id "de.undercouch.download" version "4.1.2"
 	id "com.github.johnrengelman.shadow" version "8.1.1"
 	id "io.github.pacifistmc.forgix" version "1.2.9"
@@ -22,6 +22,10 @@ rootProject.ext.assetExcludeFont = rootProject.properties.containsKey("assetExcl
 architectury {
 	minecraft = minecraft_version
 }
+
+// [续更] 仓库声明保持在 loom 插件应用之后（原始布局）：
+// loom 配置期只用其内部仓库，项目仓库在全部插件应用完毕后一次性声明，
+// 避免 Gradle 8.10+ 的"使用后突变"检查（提前声明反而会触发该问题）
 
 configure(subprojects) {
 	apply plugin: "dev.architectury.loom"
@@ -155,12 +159,17 @@ configure(allprojects) {
 	version = rootProject.mod_version + "+" + minecraft_version
 	group = project.maven_group
 
+	// [续更] 国内镜像（保持原始脚本位置：所有插件应用完毕后声明，规避仓库突变检查）
+	// mavenLocal：预下载的 GraalVM/Loom 构件，绕开 repo.maven.apache.org 的不稳定 TLS
 	repositories {
+		mavenLocal()
+		maven { url = 'https://mirrors.cloud.tencent.com/nexus/repository/maven-public/' }
+		maven { url = "https://maven.aliyun.com/repository/public/" }
+		maven { url = "https://bmclapi2.bangbang93.com/maven/" }
 		maven { url = "https://maven.terraformersmc.com/" }
 		maven { url = "https://maven.parchmentmc.org/" }
 		maven { url "https://maven.shedaniel.me"}
 		maven { url "https://repo1.maven.org/maven2/" }
-		maven { url "https://nexus.velocitypowered.com/repository/maven-public/" }
 	}
 
 	tasks.withType(JavaCompile) {

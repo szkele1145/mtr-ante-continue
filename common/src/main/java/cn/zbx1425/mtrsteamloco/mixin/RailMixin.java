@@ -111,6 +111,40 @@ public abstract class RailMixin implements RailExtraSupplier {
     @Override
     public void setRollAngleMap(Map<Double, Float> rollAngleMap) {
         this.rollAngleMap = rollAngleMap;
+        // [续更优化] 数据变更时使排序缓存失效，下次查询惰性重建
+        this.nteSortedRollKeys = null;
+        this.nteSortedRollValues = null;
+    }
+
+    // [续更优化] 滚转查询热路径缓存：多车多线存档下 getRollAngle 每帧调用上千次，
+    // 原实现每次调用都要装箱排序整个 Map，是可测量的 GC 压力来源
+    private double[] nteSortedRollKeys = null;
+    private float[] nteSortedRollValues = null;
+
+    @Override
+    public double[] nte$getSortedRollKeys() {
+        if (nteSortedRollKeys == null) nteRebuildRollCache();
+        return nteSortedRollKeys;
+    }
+
+    @Override
+    public float[] nte$getSortedRollValues() {
+        if (nteSortedRollValues == null) nteRebuildRollCache();
+        return nteSortedRollValues;
+    }
+
+    private void nteRebuildRollCache() {
+        final java.util.TreeMap<Double, Float> sorted = new java.util.TreeMap<>(rollAngleMap);
+        final double[] ks = new double[sorted.size()];
+        final float[] vs = new float[sorted.size()];
+        int i = 0;
+        for (final Map.Entry<Double, Float> e : sorted.entrySet()) {
+            ks[i] = e.getKey();
+            vs[i] = e.getValue();
+            i++;
+        }
+        this.nteSortedRollValues = vs;
+        this.nteSortedRollKeys = ks;
     }
 
     @Override

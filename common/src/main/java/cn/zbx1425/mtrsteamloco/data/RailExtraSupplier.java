@@ -30,6 +30,11 @@ public interface RailExtraSupplier {
 
     void setRollAngleMap(Map<Double, Float> rollAngleMap);
 
+    // [续更优化] 供 getRollAngle 使用的排序键缓存；实现在 setRollAngleMap 时失效
+    double[] nte$getSortedRollKeys();
+
+    float[] nte$getSortedRollValues();
+
     Map<String, String> getCustomConfigs();
     
     void setCustomConfigs(Map<String, String> customConfigs);
@@ -82,42 +87,43 @@ public interface RailExtraSupplier {
     }
 
     static float getRollAngle(Rail rail, double value) {
-        Map<Double, Float> rollAngleMap = ((RailExtraSupplier) rail).getRollAngleMap();
-        boolean reversed = ((RailExtraSupplier) rail).getRenderReversed();
+        RailExtraSupplier supplier = (RailExtraSupplier) rail;
+        double[] keys = supplier.nte$getSortedRollKeys();
+        final int n = keys.length;
+        if (n == 0) return 0;
+
+        boolean reversed = supplier.getRenderReversed();
         float k = reversed ? -1F : 1F;
-        
-        if (reversed) {
-            value = rail.getLength() - value;
+        if (reversed) value = rail.getLength() - value;
+
+        // [续更修复+优化] 节点未覆盖的区段按 0° 处理（隐式端点），而不是把最近节点的角度
+        // 钳制到整条轨道。旧逻辑下单个中点节点会导致整条轨道一起滚转，
+        // 且轨道端面带倾角，与相邻未刷滚转的轨道衔接时出现明显断裂。
+        // 若用户在端点显式放置了节点，则仍以显式值优先（支持跨轨连续滚转）。
+        // 排序键值由实现方缓存（RailMixin），此处二分查找、零分配。
+        final float[] values = supplier.nte$getSortedRollValues();
+        final double length = rail.getLength();
+        final double eps = 1e-4;
+
+        if (value <= 0) return k * (keys[0] > eps ? 0f : values[0]);
+        if (value >= length) return k * (keys[n - 1] < length - eps ? 0f : values[n - 1]);
+
+        if (value < keys[0]) {
+            return k * interpolate(0f, 0f, keys[0], value, values[0]);
         }
-        
-        if (rollAngleMap.isEmpty()) {
-            return 0;
+        if (value > keys[n - 1]) {
+            return k * interpolate(keys[n - 1], values[n - 1], length, value, 0f);
         }
-        
-        List<Double> keys = new ArrayList<>(rollAngleMap.keySet());
-        keys.sort(Double::compareTo);
-        
-        if (value <= keys.get(0)) {
-            return k * rollAngleMap.get(keys.get(0));
-        }
-        
-        int size = keys.size();
-        if (value >= keys.get(size - 1)) {
-            return k * rollAngleMap.get(keys.get(size - 1));
-        }
-        
-        double lastKey = keys.get(0);
-        for (int i = 1; i < size; i++) {
-            double currentKey = keys.get(i);
-            if (lastKey <= value && value < currentKey) {
-                double t = (value - lastKey) / (currentKey - lastKey);
-                double cosFactor = (1 - Math.cos(t * Math.PI)) / 2.0;
-                float interpolated = (float) (rollAngleMap.get(lastKey) * (1 - cosFactor) 
-                                            + rollAngleMap.get(currentKey) * cosFactor);
-                return k * interpolated;
-            }
-            lastKey = currentKey;
-        }
-        return 0;
+
+        int idx = java.util.Arrays.binarySearch(keys, value);
+        if (idx >= 0) return k * values[idx];
+        idx = -idx - 1;
+        return k * interpolate(keys[idx - 1], values[idx - 1], keys[idx], value, values[idx]);
+    }
+
+    private static float interpolate(double x0, float y0, double x1, double x, float y1) {
+        double t = (x - x0) / (x1 - x0);
+        double cosFactor = (1 - Math.cos(t * Math.PI)) / 2.0;
+        return (float) (y0 * (1 - cosFactor) + y1 * cosFactor);
     }
 }

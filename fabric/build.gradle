@@ -73,13 +73,20 @@ shadowJar {
 	relocate 'de.javagl', 'vendor.cn.zbx1425.sowcerext.de.javagl'
 	// relocate 'org.mozilla', 'vendor.cn.zbx1425.mtrsteamloco.org.mozilla'
 
-	from project.configurations.clothConfigJar.files.collect {
-		return zipTree(it).matching { filter ->
-			filter.include { e ->
-				matchInnerClass e.path as String,
-						"me/shedaniel/clothconfig2",
-						"me/shedaniel/math",
-						"assets/cloth-config2"
+	// [续更修复] 此处必须惰性解析：原写法 `configurations.clothConfigJar.files` 会在
+	// 配置期强制解析依赖，导致仓库容器被标记"已使用"，随后 loom 的 setupMinecraft
+	// 再添加其本地仓库时触发 Gradle 8.10+ 的
+	// "Cannot mutate content repository descriptor ... after repository has been used"
+	// （作者最后的提交正是在 Gradle 8.10/8.11 升级后卡在此问题，随后停更）
+	from {
+		project.configurations.clothConfigJar.files.collect {
+			return zipTree(it).matching { filter ->
+				filter.include { e ->
+					matchInnerClass e.path as String,
+							"me/shedaniel/clothconfig2",
+							"me/shedaniel/math",
+							"assets/cloth-config2"
+				}
 			}
 		}
 	}

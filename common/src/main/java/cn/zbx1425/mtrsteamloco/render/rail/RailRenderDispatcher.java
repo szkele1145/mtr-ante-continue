@@ -47,6 +47,14 @@ public class RailRenderDispatcher {
 
     private final HashSet<Rail> currentFrameRails = new HashSet<>();
 
+    // [续更优化] 排序结果缓存：相机跨 chunk 或 chunk 结构变化时才重新排序，
+    // 避免大型存档下每帧 O(n log n) 排序；复用差集容器减少每帧 GC 压力
+    private int structureVersion = 0;
+    private int lastSortedVersion = -1;
+    private long lastSortedCameraChunk = Long.MIN_VALUE;
+    private final HashSet<Rail> scratchRailsToAdd = new HashSet<>();
+    private final HashSet<Rail> scratchRailsToRemove = new HashSet<>();
+
     public static boolean isHoldingRailItem = false;
     public static boolean isHoldingBrush = false;
     public static boolean isHoldingRailItemOrBrush = false;
@@ -54,6 +62,7 @@ public class RailRenderDispatcher {
 
     private void addRail(Rail rail) {
         if (railRefMap.containsKey(rail)) return;
+        structureVersion++;
         BakedRail bakedRail = new BakedRail(rail);
         railRefMap.put(rail, bakedRail);
         HashMap<Long, RailChunkBase> chunkMap = railChunkMap.get(bakedRail.modelKey);
@@ -77,6 +86,7 @@ public class RailRenderDispatcher {
 
     private void removeRail(Rail rail) {
         if (!railRefMap.containsKey(rail)) return;
+        structureVersion++;
         BakedRail bakedRail = railRefMap.get(rail);
         railRefMap.remove(rail);
         HashMap<Long, RailChunkBase> chunkMap = railChunkMap.get(bakedRail.modelKey);
@@ -97,6 +107,7 @@ public class RailRenderDispatcher {
 
     public void clearRail() {
         currentFrameRails.clear();
+        structureVersion++;
         Collection<BakedRail> bakedRails = railRefMap.values();
         for (BakedRail rail : bakedRails) {
             rail.dispose();
@@ -148,32 +159,35 @@ public class RailRenderDispatcher {
         if (isInstanced != shouldBeInstanced) clearRail();
         isInstanced = shouldBeInstanced;
 
-        HashSet<Rail> railsToAdd = new HashSet<>(currentFrameRails);
+        HashSet<Rail> railsToAdd = scratchRailsToAdd;
+        HashSet<Rail> railsToRemove = scratchRailsToRemove;
+        railsToAdd.clear();
+        railsToAdd.addAll(currentFrameRails);
         railsToAdd.removeAll(railRefMap.keySet());
         for (Rail rail : railsToAdd) addRail(rail);
-        HashSet<Rail> railsToRemove = new HashSet<>(railRefMap.keySet());
+        railsToRemove.clear();
+        railsToRemove.addAll(railRefMap.keySet());
         railsToRemove.removeAll(currentFrameRails);
         for (Rail rail : railsToRemove) removeRail(rail);
         currentFrameRails.clear();
 
         Vec3 cameraBlockPos = Minecraft.getInstance().gameRenderer.getMainCamera().getPosition();
         Vector3f cameraPos = new Vector3f(cameraBlockPos);
-        // List<RailChunkBase> railChunkList = new ArrayList<>(this.railChunkList);
-        // for (BakedRail rail : railRefMap.values()) {
-        //     if (rail.scriptContext == null) continue;
-        //     RailModelProperties properties = rail.getProperties();
-        //     if (properties == null) continue;
-        //     if (properties.script == null) continue;
-        //     properties.script.tryCallRenderFunctionAsync(rail.scriptContext);
-        //     railChunkList.addAll(rail.scriptContext.chunks.values());
-        // }
-        railChunkList.sort(Comparator.comparingDouble(chunk -> chunk.getCameraDistManhattanXZ(cameraBlockPos)));
+
+        // [续更优化] 排序与距离缓存：相机没跨 chunk 且结构未变时跳过每帧全量重排
+        // （大型存档 railChunkList 可能上千，每帧 sort 是稳定的帧率毛刺来源）
+        final long cameraChunk = BakedRail.chunkIdFromWorldPos((float) cameraBlockPos.x, (float) cameraBlockPos.z);
+        final boolean needsResort = structureVersion != lastSortedVersion || cameraChunk != lastSortedCameraChunk;
+        if (needsResort) {
+            railChunkList.sort(Comparator.comparingDouble(chunk -> chunk.getCameraDistManhattanXZ(cameraBlockPos)));
+            lastSortedVersion = structureVersion;
+            lastSortedCameraChunk = cameraChunk;
+        }
 
         Frustum cullingFrustum = ((LevelRendererAccessor)Minecraft.getInstance().levelRenderer).getCullingFrustum();
         ShaderProp shaderProp = new ShaderProp().setViewMatrix(viewMatrix);
 
         int maxRailDistance = MTRClient.isReplayMod() ? 64 * 16 : (UtilitiesClient.getRenderDistance() + 3) * 16;
-        boolean isOutsideRenderDistance = false;
 
         RailChunkBase.upload();
 
@@ -185,9 +199,10 @@ public class RailRenderDispatcher {
                 railChunkMap.get(chunk.modelKey).remove(chunk.chunkId);
                 continue;
             }
-            if (isOutsideRenderDistance) continue;
-            if (chunk.cameraDistManhattanXZ > maxRailDistance) {
-                isOutsideRenderDistance = true;
+            // [续更优化] 距离逐 chunk 实时计算（开销可忽略）：排序结果已缓存，
+            // 不能再依赖"排好序后首次超距即整体退出"的旧短路逻辑，
+            // 否则相机小幅移动时会在渲染距离边界产生错误剔除
+            if (chunk.getCameraDistManhattanXZ(cameraBlockPos) > maxRailDistance) {
                 continue;
             }
             if (!chunk.bufferBuilding && (chunk.isDirty || !chunk.bufferBuilt)) {

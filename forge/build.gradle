@@ -70,13 +70,17 @@ shadowJar {
 	relocate 'de.javagl', 'vendor.cn.zbx1425.sowcerext.de.javagl'
 	relocate 'com.github.stuxuhai', 'vendor.cn.zbx1425.mtrsteamloco.com.github.stuxuhai'
 
-	from project.configurations.clothConfigJar.files.collect {
-		return zipTree(it).matching { filter ->
-			filter.include { e ->
-				matchInnerClass e.path as String,
-						"me/shedaniel/clothconfig2",
-						"me/shedaniel/math",
-						"assets/cloth-config2"
+	// [续更修复] 同 fabric：必须惰性解析，否则配置期强解析依赖会触发
+	// Gradle 8.10+ 的仓库"使用后突变"检查（loom setupMinecraft 无法再加仓库）
+	from {
+		project.configurations.clothConfigJar.files.collect {
+			return zipTree(it).matching { filter ->
+				filter.include { e ->
+					matchInnerClass e.path as String,
+							"me/shedaniel/clothconfig2",
+							"me/shedaniel/math",
+							"assets/cloth-config2"
+				}
 			}
 		}
 	}

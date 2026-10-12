@@ -68,8 +68,12 @@ public abstract class RailChunkBase implements Closeable {
         return new ChunkPos((int)(chunkId >> 32) << BakedRail.POS_SHIFT, (int)(chunkId & 0xFFFFFFFFL) << BakedRail.POS_SHIFT);
     }
 
+    // [续更修复] 判断区块更新（方块/光照）的 Y 区段是否与本轨道 chunk 的 Y 范围重叠。
+    // 旧实现条件写反（"区段在范围外"才返回 true）：同层的轨道永不重烘焙（光照更新丢失），
+    // 而远处无关更新反而触发重建，大型存档下形成持续重建风暴。
+    // 现按标准重叠判定：区段顶 > 范围底 且 区段底 < 范围顶。
     public boolean containsYSection(int yMin, int yMax) {
-        return (yMin << 4) < boundingBox.minY || (yMax << 4) > boundingBox.maxY;
+        return ((yMax + 1) << 4) > boundingBox.minY && (yMin << 4) < boundingBox.maxY;
     }
 
     public double getCameraDistManhattanXZ(Vec3 cameraPos) {
