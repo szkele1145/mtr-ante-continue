@@ -473,6 +473,10 @@ public abstract class RailMixin implements RailExtraSupplier {
         } catch (Exception e) {
             rollAngleMap = new HashMap<>();
         }
+        // [续更修复] 反序列化直接写字段绕过了 setRollAngleMap 的缓存失效——
+        // 必须同步清空排序缓存，否则查询继续返回旧数据的快照（新滚转不生效）
+        this.nteSortedRollKeys = null;
+        this.nteSortedRollValues = null;
         openingDirection = messagePackHelper.getInt("opening_direction", 0);
         rollingOffset = messagePackHelper.getFloat("rolling_offset", 1.435F / 2F);
         pathMode = messagePackHelper.getInt("path_mode", 0);
@@ -550,6 +554,9 @@ public abstract class RailMixin implements RailExtraSupplier {
         } catch (Exception e) {
             rollAngleMap = new HashMap<>();
         }
+        // [续更修复] 同上：网络反序列化路径的缓存失效
+        this.nteSortedRollKeys = null;
+        this.nteSortedRollValues = null;
         openingDirection = packet.readInt();
         rollingOffset = packet.readFloat();
         pathMode = packet.readInt();
