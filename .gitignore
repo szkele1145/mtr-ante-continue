@@ -67,3 +67,6 @@ extracted_changelog.md
 libs/
 
 artifacts/
+
+# CI workflows (token scope)
+.github/workflows/
