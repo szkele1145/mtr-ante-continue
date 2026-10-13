@@ -4,6 +4,15 @@
 原作者已停止维护，最后一个稳定版为 1.1.0（另有 1.1.1-preview 开发版）。
 续更版基于 `alpha` 分支（1.1.1-preview-4, commit `c9765ea`）继续开发。
 
+## 多版本矩阵（2026-10-14）
+
+- **新增 MC 1.18.2 / 1.19.2 / 1.19.4 构建**（Fabric+Forge forgix 合并包），
+  与 1.20.1 同修复集、同构建链（作者 GitHub Pages 三版本 MTR 依赖均可用）。
+- 与作者 DEV-1307 的基线差异分析见 [docs/dev1307-comparison.md](docs/dev1307-comparison.md)；
+  dev 环境 per-version mappings 限制见 [docs/multiversion-verification.md](docs/multiversion-verification.md)。
+- 发布渠道：Modrinth（审核中）+ [GitHub Releases](https://github.com/szkele1145/mtr-ante-continue/releases)
+  （v1.1.1-continue.2 挂四版本全矩阵 jar）。
+
 ## 1.1.1-continue.2（热修）
 
 - **滚转缓存在反序列化路径不失效**：`RailMixin` 的 messagepack（存档载入）与
