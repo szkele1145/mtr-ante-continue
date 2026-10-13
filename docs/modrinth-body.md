@@ -1,13 +1,13 @@
 # Modrinth 页面文案（发布用草稿）
 
 ## 标题
-Aphrodite's Nemo's Transit Expansion (Continued)
+MTR-ANTE Continued
 
 ## Slug
 mtr-ante-continue
 
 ## 简介（一句话）
-Community continuation of ANTE — experimental extensions for MTR 3.2.x: continuous curves, cant/rolling, JS scripting, optimized rail rendering.
+Community continuation of ANTE — experimental extensions for MTR 3.2.x: continuous curves, cant/rolling, JS scripting, optimized rail rendering. Now on 4 MC versions.
 
 ## 正文
 
@@ -26,32 +26,31 @@ Aphrodite's Nemo's Transit Expansion (ANTE) adds experimental features to the
 ### What this continuation fixes / improves
 
 **Fixed**
-- Rolling (cant) interpolation: nodes outside covered segments are no longer clamped
-  across the whole rail — rolling now transitions smoothly between nodes and eases to 0°
-  at rail ends, so rails connect naturally at both ends (previously a single mid-rail node
-  rolled the entire rail and broke joints).
-- Block-light updates now correctly mark only overlapping rail chunks for re-bake
-  (the Y-range test was inverted: same-level light changes never re-baked, while
-  unrelated updates triggered rebuild storms on large worlds).
+1. Rolling (cant) interpolation: nodes outside covered segments are no longer clamped
+   across the whole rail — rolling now transitions smoothly between nodes and eases to 0°
+   at rail ends, so rails connect naturally at both ends (previously a single mid-rail node
+   rolled the entire rail and broke joints).
+2. Block-light updates now correctly mark only overlapping rail chunks for re-bake
+   (the Y-range test was inverted: same-level light changes never re-baked, while
+   unrelated updates triggered rebuild storms on large worlds).
+3. **JS script sandbox**: GraalVM 24.x removed the internal API the original used
+   (the reason 1.1.1 never shipped). Reimplemented with a public-API root-directory
+   sandbox — JS scripts are anchored to `./ante/script_data/`, no escapes.
+4. **Roll-cache invalidation** (1.1.1-continue.2 hotfix): freshly loaded or synced
+   rails could keep serving the previous rail's cached roll data until edited.
 
 **Optimized (conservative — no visual/behavioral changes)**
-- Rolling angle queries: sorted-key caching + binary search (the old code boxed and
-  sorted the whole map on every call — a measurable GC hotspot with many trains/lines)
-- Rail chunk sort cache: re-sorts only when rail structure changes or the camera
-  crosses a chunk boundary (previously every frame), removing frame spikes on large worlds
-- Frame-diff scratch sets reused instead of per-frame HashSet allocations
+- Rolling angle queries: sorted-key caching + binary search
+- Rail chunk sort cache: re-sorts only when structure changes or camera crosses a chunk
+- Frame-diff scratch sets reused
 
-### Compatibility
-- Requires MTR 3.1.12 ~ 3.2.2 (client & server)
+### Versions & Compatibility
+- **MC 1.18.2 / 1.19.2 / 1.19.4 / 1.20.1** — Fabric+Forge merged jars (forgix)
+- Requires MTR 3.1.12 ~ 3.2.2 (client & server); not compatible with MTR 4.x
+- Fully compatible with YMTR (Yomi's MTR) — no ANTE FIX needed
 - Works alongside JCM, YUM and other MTR 3.x addons
-- Not compatible with MTR 4.x
 
 ### Build from source
 See the [GitHub repository](https://github.com/szkele1145/mtr-ante-continue) README
-(mirrors + proxy support built in for CN networks).
-
-## 标签
-technology, transportation, fabric, forge, 1.20.1 (+其它按实际发布版本)
-
-## 环境声明
-client & server 均必需（required）
+(mirrors + per-version MTR deps auto-download; dev-server smoke limited by
+author-published mappings — release builds unaffected, details in the repo docs).
