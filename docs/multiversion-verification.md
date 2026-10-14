@@ -35,3 +35,12 @@ fabric-api 的 command.v2 / itemgroup.v1 包在 1.18.2 编译环境缺失。
 已发布的三版本 jar 保持不动。若用户报告某个旧版本有运行时问题，
 优先怀疑 common 层修复与旧版本 MTR API 的交互——届时用对应版本 mappings
 （需从 fabricmc/yarn 手工生成）构建 dev 环境定位。
+
+## 佐证补强（2026-10-14 静态扫描）
+
+common 模块 272 个 java 文件中 63 个（23%）含 manifold 的
+`#if MC_VERSION` / `#switch MC_VERSION` per-version 分支——
+**四项修复涉及的 RailMixin / RootedScriptFileSystem / ScriptHolderBase
+/ RailChunkBase 全部不在其中**（零版本分支）。修复的版本无关性
+从架构推断升级为数据佐证：三版本发布 jar 与 1.20.1 的修复语义
+一致性有了静态证据链。
