@@ -49,6 +49,7 @@ Aphrodite's Nemo's Transit Expansion (ANTE) adds experimental features to the
 - Requires MTR 3.1.12 ~ 3.2.2 (client & server); not compatible with MTR 4.x
 - Fully compatible with YMTR (Yomi's MTR) — no ANTE FIX needed
 - Works alongside JCM, YUM and other MTR 3.x addons
+- **Ecosystem companions (quad-test verified)**: [MTR Turbo](https://modrinth.com/mod/mtr-turbo) (performance addon — auto-hands-over its U5 mixin when ANTE is present, everything else stays active) and [MTR Next](https://modrinth.com/mod/mtr-next) (4.x features on 3.x — reads the vehicles section of dual-format packs while ANTE reads their rail styles; zero overlap)
 
 ### Build from source
 See the [GitHub repository](https://github.com/szkele1145/mtr-ante-continue) README
