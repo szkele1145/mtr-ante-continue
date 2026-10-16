@@ -76,30 +76,31 @@ task setupLibrary() {
 
 	String url = "https://aphrodite281.github.io/Minecraft-Transit-Railway-3.x.x/lib/" + minecraft_version + "/"
 
+	def files = [
+			["mtr-common.jar", "checkouts/${minecraft_version}/mtr-common.jar"],
+			["mtr-fabric.jar", "checkouts/${minecraft_version}/mtr-fabric.jar"],
+			["mtr-forge.jar", "checkouts/${minecraft_version}/mtr-forge.jar"],
+			["files.zip", "checkouts/${minecraft_version}/files.zip"]
+	]
+
+	files.each { name, dest ->
+		tasks.register("downloadSetup${name.capitalize()}", de.undercouch.gradle.tasks.download.Download) {
+			src "${url}${name}"
+			dest dest
+			overwrite false
+			onlyIf { !file(dest).exists() }
+			doFirst {
+				if (!file(dest).exists()) {
+					println "Downloading $name ..."
+				} else {
+					println "Skipping $name - already exists"
+				}
+			}
+		}
+	}
+
 	doFirst {
-		download {
-			src "${url}mtr-common.jar"
-			dest "checkouts/${minecraft_version}/mtr-common.jar"
-			// overwrite true
-		}
-
-		download {
-			src "${url}mtr-fabric.jar"
-			dest "checkouts/${minecraft_version}/mtr-fabric.jar"
-			// overwrite true
-		}
-
-		download {
-			src "${url}mtr-forge.jar"
-			dest "checkouts/${minecraft_version}/mtr-forge.jar"
-			// overwrite true
-		}
-		
-		download {
-			src "${url}files.zip"
-			dest "checkouts/${minecraft_version}/files.zip"
-			// overwrite true
-		}
+		// no-op; downloads run as separate up-to-date tasks
 	}
 }
 
