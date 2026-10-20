@@ -29,7 +29,12 @@ public abstract class RailChunkBase implements Closeable {
     protected static ConcurrentLinkedQueue<Runnable> UPLOAD_QUEUE = new ConcurrentLinkedQueue<>();
 
     public Long chunkId;
-    public AABB boundingBox;
+    // [修复 2026-10-21] boundingBox 由后台 EXECUTOR 线程写（setBoundingBox）、
+    // 渲染线程读（RailRenderDispatcher 的视锥剔除与相机距离计算）。
+    // 原为普通字段，无 happens-before 关系 ⇒ 渲染线程可能读到**半更新**的 AABB
+    // （minX 是新值、maxX 还是旧值）⇒ 轨道被错误剔除或错误渲染。
+    // AABB 是不可变对象，volatile 整体替换引用即可保证可见性。
+    public volatile AABB boundingBox;
     public HashMap<BakedRail, ArrayList<Matrix4f>> containingRails = new HashMap<>();
     public HashMap<BakedRail, ArrayList<Matrix4f>> containingRailsWriting = new HashMap<>();
 

@@ -178,127 +178,11 @@ public abstract class ScriptHolderBase {
             .option("log.file", "./logs/latest.log")
             .build();
 
-        if (false) {
-        context = Context.newBuilder("js")  
-            .sandbox(SandboxPolicy.TRUSTED)
-            .allowPolyglotAccess(true ? PolyglotAccess.ALL : PolyglotAccess.NONE)
-            .allowNativeAccess(true)
-            .option("engine.WarnInterpreterOnly", "false")
-            .allowCreateThread(true)  
-            .allowCreateProcess(true)
-            .allowHostClassLoading(true)  
-            .allowHostClassLookup(className -> true)  
-            .allowIO(trust ? IOAccess.ALL : IOAccess.NONE)  
-            .allowEnvironmentAccess(true ? EnvironmentAccess.INHERIT : EnvironmentAccess.NONE)  
-            .allowExperimentalOptions(true)  
-            .allowInnerContextOptions(true)  
-            .allowValueSharing(true)
-            .allowHostAccess(
-                HostAccess.newBuilder()
-                .allowPublicAccess(true)
-                .allowAllImplementations(true)
-                .allowAllClassImplementations(true)
-                .allowArrayAccess(true)
-                .allowListAccess(true)
-                .allowBufferAccess(true)
-                .allowIterableAccess(true)
-                .allowIteratorAccess(true)
-                .allowMapAccess(true)
-                .allowAccessInheritance(true)
-                .allowBigIntegerNumberAccess(true)
-                .targetTypeMapping(
-                    Double.class,
-                    Double.class,
-                    value -> true,
-                    value -> value,
-                    HostAccess.TargetMappingPrecedence.HIGHEST
-                )
-                .targetTypeMapping(
-                    Double.class,
-                    Float.class,
-                    value -> true,
-                    value -> value.floatValue(),
-                    HostAccess.TargetMappingPrecedence.HIGH
-                )
-                .targetTypeMapping(
-                    Double.class,
-                    Long.class,
-                    value -> true,
-                    value -> Math.round(value),
-                    HostAccess.TargetMappingPrecedence.LOW
-                )
-                .targetTypeMapping(
-                    Double.class,
-                    Integer.class,
-                    value -> true,
-                    value -> (int) Math.round(value),
-                    HostAccess.TargetMappingPrecedence.LOW
-                )
-                .targetTypeMapping(
-                    Double.class,
-                    Short.class,
-                    value -> true,
-                    value -> (short) Math.round(value),
-                    HostAccess.TargetMappingPrecedence.LOW
-                )
-                .targetTypeMapping(
-                    Double.class,
-                    Byte.class,
-                    value -> true,
-                    value -> (byte) Math.round(value),
-                    HostAccess.TargetMappingPrecedence.LOW
-                )
-                // .targetTypeMapping(
-                //     Double.class,
-                //     String.class,
-                //     value -> true,
-                //     value -> Double.toString(value)
-                // )
-                // .targetTypeMapping(
-                //     Integer.class,
-                //     String.class,
-                //     value -> true,
-                //     value -> Integer.toString(value)
-                // )
-                // .targetTypeMapping(
-                //     Float.class,
-                //     String.class,
-                //     value -> true,
-                //     value -> Float.toString(value)
-                // )
-                // .targetTypeMapping(
-                //     Long.class,
-                //     String.class,
-                //     value -> true,
-                //     value -> Long.toString(value)
-                // )
-                // .targetTypeMapping(
-                //     Short.class,
-                //     String.class,
-                //     value -> true,
-                //     value -> Short.toString(value)
-                // )
-                // .targetTypeMapping(
-                //     Byte.class,
-                //     String.class,
-                //     value -> true,
-                //     value -> Byte.toString(value)
-                // )
-                .build()
-            )
-            // .option("js.syntax-extensions", "true")
-            .option("js.script-engine-global-scope-import", "true")
-            .option("js.ecmascript-version", "latest")
-            .option("js.foreign-object-prototype", "true")
-            .option("log.file", "./logs/latest.log")
-            .option("js.strict", "true")
-            .option("js.disable-eval", trust ? "false" : "true")
-            .option("js.error-cause", "true")
-            .option("js.operator-overloading", "true")
-            .option("js.profile-time", "true")
-            .option("js.nashorn-compat", "true")
-            .build();
-        }
+        // [移除 2026-10-21] 下方原有一段 if (false) { ... } 的死代码，
+        // 内含「全沙箱打开」配置（allowCreateProcess / allowHostClassLoading /
+        // allowHostClassLookup(全放行) / allowIO(ALL) / allowNativeAccess(true)）。
+        // 把 if (false) 改成 if (true) 就会立刻开全沙箱 —— 典型风险信号，
+        // 且与上方实际生效的受限 Context 配置并存易误导。已整块删除（git 历史可找回）。
 
         globalBindings = context.getBindings("js");    
         
@@ -336,7 +220,10 @@ public abstract class ScriptHolderBase {
     }
 
     protected void inject(String key, String value) {
-        context.eval("js", "var " + key + " = '" + value + "';");
+        // [修复 2026-10-21] 原来是 eval 字符串拼接（"var " + key + " = '" + value + "';"），
+        // 值里出现单引号 / 反斜杠 / 换行就会破坏脚本。当前调用点（SIDE / MOD_ENV）
+        // 的值都是内部常量，行为不变，但改走 bindings 以彻底消除注入面。
+        globalBindings.putMember(key, value);
     }
 
     protected void eval(String script) {
@@ -346,9 +233,21 @@ public abstract class ScriptHolderBase {
     protected void appendImporter() {
         eval(PRETREATMENT);
         inject("SIDE", side);
+        // [修复 2026-10-21] CONFIG_INFO 注入曾用「Gson toJson + 手工转义引号 +
+        // 塞进 JS 模板字符串」的写法。模板字符串会再解释一次转义序列：
+        // 配置值里出现 Windows 路径（反斜杠 `C:\mc\server`）、换行或制表符时，
+        // JSON.parse 直接抛 Bad escaped character / Bad control character，
+        // 整个资源包脚本的 load() 失败（复现脚本 tools/verify_script_injection.mjs）。
+        //
+        // 现改为两步，**只编码一次**：
+        //   1) JSON 文本作为 JS 字符串值经 bindings 传入（GraalVM 直接搬运字符串，
+        //      不经过任何 eval 拼接，因此没有二次转义）；
+        //   2) 在 JS 侧用 JSON.parse 解析。
+        // CONFIG_INFO 仍然是**已解析的对象**（脚本侧 `CONFIG_INFO.xxx` 的用法不变），
+        // 只是解析地点从 Java 字符串拼接挪到了 JS。
         String configInfo = new GsonBuilder().disableHtmlEscaping().create().toJson(config);
-        configInfo = configInfo.replace("\"", "\\\"");
-        eval("CONFIG_INFO = JSON.parse(`" + configInfo + "`);");
+        globalBindings.putMember("CONFIG_INFO_JSON", configInfo);
+        eval("var CONFIG_INFO = JSON.parse(CONFIG_INFO_JSON);");
         inject("MOD_ENV", Main.class.getPackageName().split("\\.")[0]);
 
         inject(ScriptResourceUtil.class, "includeScript", "include");
@@ -406,8 +305,6 @@ public abstract class ScriptHolderBase {
                 for (Value function : functions) {
                     function.executeVoid(allArgs);
                 }
-                
-                if (finishCallback != null) finishCallback.run();
 
                 failException = null;
                 failTime = 0;
@@ -415,6 +312,19 @@ public abstract class ScriptHolderBase {
                 Main.LOGGER.error("Error in ANTE Resource Pack JavaScript", ex);
                 failTime = System.currentTimeMillis();
                 failException = ex;
+            } finally {
+                // [修复 2026-10-21] finishCallback 原本在 try 内、异常时不会执行。
+                // 后果：create 回调不跑 ⇒ scriptCtx.created 永为 false ⇒
+                // tryCallRenderFunctionAsync 每帧都走 "create" 分支 ⇒ 无限重试；
+                // 且 scriptCtx.renderFunctionFinished() 永不被调用 ⇒ 渲染状态卡死。
+                // 移到 finally：无论成功还是抛异常都执行一次。
+                if (finishCallback != null) {
+                    try {
+                        finishCallback.run();
+                    } catch (Exception ex) {
+                        Main.LOGGER.error("Error in ANTE Resource Pack JavaScript callback", ex);
+                    }
+                }
             }
             scriptCtx.lastExecuteDuration = System.nanoTime() - start;
         });
@@ -451,7 +361,17 @@ public abstract class ScriptHolderBase {
     }
 
     public static void resetRunner() {
+        // [修复 2026-10-21] 原实现 shutdownNow() 后立刻换新 executor，
+        // 旧线程可能仍在运行并持有 Context；close() 并发 context.close() ⇒ 竞态。
+        // 等待旧线程终止（最多 1 秒）后再换新的。
         SCRIPT_THREAD.shutdownNow();
+        try {
+            if (!SCRIPT_THREAD.awaitTermination(1, TimeUnit.SECONDS)) {
+                Main.LOGGER.warn("Script thread did not terminate within 1s after shutdownNow");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
         SCRIPT_THREAD = Executors.newSingleThreadExecutor();
     }
 

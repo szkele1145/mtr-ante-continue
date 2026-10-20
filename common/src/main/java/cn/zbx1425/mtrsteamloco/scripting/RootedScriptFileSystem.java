@@ -34,7 +34,20 @@ public final class RootedScriptFileSystem implements FileSystem {
     private final Path root;
 
     public RootedScriptFileSystem(Path root) {
-        this.root = root.toAbsolutePath().normalize();
+        // [修复 2026-10-21] 原为 root.toAbsolutePath().normalize()。
+        // guard() 里 real 是 toRealPath()（已解引用符号链接）的路径，
+        // 而 root 未解引用 ⇒ 若 root 自身路径含符号链接，
+        // 合法路径会被误判越界（AccessDeniedException），
+        // 表现为「沙箱里明明有文件却读不到」。
+        // 改为对 root 也做 toRealPath()；root 不存在时退回 normalize()。
+        Path abs = root.toAbsolutePath().normalize();
+        Path real;
+        try {
+            real = abs.toRealPath();
+        } catch (IOException e) {
+            real = abs;
+        }
+        this.root = real;
     }
 
     /** 路径解引用（含符号链接）后是否仍在根目录内；越界抛 AccessDeniedException */
