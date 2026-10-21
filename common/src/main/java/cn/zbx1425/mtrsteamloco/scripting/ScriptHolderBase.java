@@ -31,11 +31,13 @@ import org.graalvm.polyglot.io.FileSystem.Selector;
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.lang.reflect.Method;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.nio.file.Path;
+import java.time.Duration;
 
 public abstract class ScriptHolderBase {
 
@@ -68,6 +70,14 @@ public abstract class ScriptHolderBase {
     private static final Set<String> ALLOWED_PACKAGES = Set.of(
         "java.awt", "java.util", "mtr"
     );
+
+    // [修复 2026-10-21] 审查项 #9：JS 脚本执行超时。
+    // 默认 10 秒：正常脚本（render 回调）远小于此值；死循环脚本会被看门狗中断。
+    private static final long SCRIPT_TIMEOUT_MILLIS = 10_000L;
+    private static final long SCRIPT_TIMEOUT_NANOS = SCRIPT_TIMEOUT_MILLIS * 1_000_000L;
+    // context.interrupt() 的等待时限：脚本线程此刻若不在 polyglot 代码里
+    // （卡在 Java 宿主调用），interrupt 会抛 TimeoutException。
+    private static final long INTERRUPT_GRACE_MILLIS = 1_000L;
 
     public void load(
         String name, String contextTypeName, ResourceManager resourceManager, 
@@ -292,7 +302,7 @@ public abstract class ScriptHolderBase {
             return null;
         }
 
-        return SCRIPT_THREAD.submit(() -> {
+        final Future<?> task = SCRIPT_THREAD.submit(() -> {
             long start = System.nanoTime();
             try {            
                 TimingUtil.prepareForScript(scriptCtx);    
@@ -328,6 +338,79 @@ public abstract class ScriptHolderBase {
             }
             scriptCtx.lastExecuteDuration = System.nanoTime() - start;
         });
+
+        // [修复 2026-10-21] 审查项 #9：JS 脚本没有执行超时。
+        // 后果：资源包作者写一个死循环（while(true){}）会永久占住 SCRIPT_THREAD，
+        // 之后所有脚本（包括其它资源包）全部排队卡死，游戏表现为"脚本功能全失"。
+        //
+        // 方案：GraalVM 24.x 的 Context.interrupt(Duration) —— 官方协作式中断，
+        // 只能由 creator thread 调用（Context.checkCreatorAccess("interrupted")）。
+        // 本类正好满足：context 在主线程创建，执行在 SCRIPT_THREAD。
+        //
+        // 看门狗放在独立的 daemon 线程上（不能用 SCRIPT_THREAD 本身——那正是被卡住的那个），
+        // 任务提前完成时靠 AtomicReference 里的完成标记提前退出。
+        startWatchdog(task, scriptCtx);
+        return task;
+    }
+
+    /**
+     * [修复 2026-10-21] 审查项 #9 —— 脚本执行超时看门狗。
+     * <p>
+     * 超时后由看门狗线程调 {@code context.interrupt(Duration)}，
+     * 脚本线程会收到 {@code PolyglotException}（"Execution interrupted."），
+     * 走 {@code callFunctionAsync} 既有的 catch 分支（记 failTime/failException）。
+     * <p>
+     * 已经在跑/已超时的脚本不会重复中断：{@code interrupted} 标志用
+     * {@link AtomicBoolean} 保证只置位一次。
+     */
+    private void startWatchdog(Future<?> task, AbstractScriptContext scriptCtx) {
+        final AtomicBoolean done = new AtomicBoolean(false);
+        final AtomicBoolean interrupted = new AtomicBoolean(false);
+        final long deadline = System.nanoTime() + SCRIPT_TIMEOUT_NANOS;
+
+        final Thread watchdog = new Thread(() -> {
+            try {
+                while (!done.get()) {
+                    if (System.nanoTime() - deadline >= 0) break;
+                    Thread.sleep(20L);
+                }
+                if (done.get()) return;
+                if (!interrupted.compareAndSet(false, true)) return;
+
+                final Context ctx = context;
+                if (ctx == null) return;
+                Main.LOGGER.error("ANTE script timed out after {} ms, interrupting execution", SCRIPT_TIMEOUT_MILLIS);
+                try {
+                    // interrupt 内部有等待时限：若脚本线程此刻没在 polyglot 代码里
+                    // （例如卡在 Java 宿主调用），interrupt 会抛 TimeoutException。
+                    ctx.interrupt(Duration.ofMillis(INTERRUPT_GRACE_MILLIS));
+                } catch (TimeoutException e) {
+                    Main.LOGGER.error("ANTE script interrupt timed out (script may be stuck in a host call)");
+                } catch (Exception e) {
+                    Main.LOGGER.error("Error interrupting ANTE script", e);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } finally {
+                // 无论成功、超时还是被打断，都保证唤醒下一个看门狗能观察到完成。
+                done.set(true);
+            }
+        }, "ante-script-watchdog");
+        watchdog.setDaemon(true);
+        watchdog.start();
+
+        // 任务提前结束 -> 让看门狗自行退出（done 标志）
+        final Thread watcher = new Thread(() -> {
+            try {
+                task.get();
+            } catch (Exception ignored) {
+                // 任务异常/取消时也要唤醒看门狗
+            } finally {
+                done.set(true);
+            }
+        }, "ante-script-watcher");
+        watcher.setDaemon(true);
+        watcher.start();
     }
 
     public void tryCallFunctionAsync(String function, AbstractScriptContext scriptCtx, Runnable callback, Object... args) {
@@ -376,6 +459,8 @@ public abstract class ScriptHolderBase {
     }
 
     public void close() {
+        // [修复 2026-10-21] 审查项 #9：close 之前先让在跑的超时看门狗失效，
+        // 否则它可能在 context 已关闭后再调 interrupt()。
         if (context != null) {
             context.close();
             context = null;

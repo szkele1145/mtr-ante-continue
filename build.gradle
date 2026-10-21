@@ -245,3 +245,64 @@ tasks.withType(JavaCompile) {
     options.incremental = true;
 }
 
+// [验证 2026-10-21] 审查项 #9 —— 脚本执行超时机制的可执行验证。
+// 独立 Java 程序（不依赖 MC），用真实 GraalVM 24.2.2 证明：
+//   1) 死循环脚本确实停不下来（问题真实存在）；
+//   2) Context.interrupt(Duration) 能在有限时间内中断它；
+//   3) 抛出 PolyglotException（ante 既有的 catch (Exception) 能接住）；
+//   4) 中断后 context 仍可继续执行后续脚本；
+//   5) 正常长脚本不会被误杀。
+tasks.register('verifyScriptTimeout', JavaExec) {
+    group = 'verification'
+    description = '验证审查项 #9：JS 脚本执行超时（Context.interrupt）'
+
+    // GraalVM 依赖声明在 common 子项目（compileOnly），根项目没有 runtimeClasspath。
+    // 且 org.graalvm.polyglot:js 是 POM-only 聚合件，真正的 JS 语言实现是
+    // org.graalvm.js:js-language —— compileClasspath 里不会有它，必须显式补。
+    def commonProject = project(':common')
+    def graaljsVersion = rootProject.ext.graaljsVersion
+    def graalCp = commonProject.configurations.detachedConfiguration(
+            commonProject.dependencies.create("org.graalvm.polyglot:polyglot:${graaljsVersion}"),
+            commonProject.dependencies.create("org.graalvm.js:js-language:${graaljsVersion}"),
+            commonProject.dependencies.create("org.graalvm.truffle:truffle-api:${graaljsVersion}"),
+            commonProject.dependencies.create("org.graalvm.truffle:truffle-runtime:${graaljsVersion}")
+    )
+    def cp = graalCp.files.collect { it.absolutePath }.join(File.pathSeparator)
+
+    def srcFile = file('tools/VerifyScriptTimeout.java')
+    def outDir = layout.buildDirectory.dir('verify-script-timeout').get().asFile
+
+    inputs.file(srcFile)
+    outputs.dir(outDir)
+
+    doFirst {
+        outDir.mkdirs()
+        // 只编译这一份独立程序（不依赖 MC classpath）。
+        // 用 JDK 自带的 javax.tools.JavaCompiler（不引 Ant 的嵌套 src 语法坑）。
+        def compiler = javax.tools.ToolProvider.getSystemJavaCompiler()
+        if (compiler == null) {
+            throw new GradleException('需要 JDK（不是 JRE）来编译 VerifyScriptTimeout.java')
+        }
+        def fileManager = compiler.getStandardFileManager(null, null, null)
+        def units = fileManager.getJavaFileObjects(srcFile)
+        def options = [
+                '-classpath', cp,
+                '-d', outDir.absolutePath,
+                '-encoding', 'UTF-8',
+                '-nowarn'
+        ] as List
+        def task = compiler.getTask(null, fileManager, null, options, null, units)
+        def ok = task.call()
+        fileManager.close()
+        if (!ok) {
+            throw new GradleException('VerifyScriptTimeout.java 编译失败')
+        }
+    }
+
+    // 注意：Groovy 里不要写 outDir + File.pathSeparator + cp
+    // （File 没有 plus 运算符），用 files(...) 组合。
+    classpath = files(outDir.toURI(), graalCp)
+    mainClass = 'VerifyScriptTimeout'
+}
+
+
