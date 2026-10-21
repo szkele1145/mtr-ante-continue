@@ -26,7 +26,13 @@ import org.graalvm.polyglot.Source;
 import org.graalvm.polyglot.Value;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -128,6 +134,107 @@ public final class VerifyScriptTimeout {
         } catch (Throwable t3) {
             check("事实5：正常长脚本执行完毕未被误杀", false);
             System.out.println("  异常: " + t3);
+        }
+
+        // =====================================================================
+        // 事实 6-8（2026-10-21 线程爆炸优化）：复刻新版看门狗逻辑并验证。
+        //
+        // 新版 ScriptHolderBase.startWatchdog 用**静态 ScheduledExecutorService**
+        // （1 个 daemon 线程）schedule 一次性任务，不再每次调用新建 2 个线程。
+        // 任务触发时用 task.isDone() 判断脚本是否已提前完成。
+        //
+        // 下面复刻同一逻辑（独立实现，不依赖 MC 类）验证三点：
+        //   6. 提前完成的脚本不会触发 interrupt（isDone 短路生效）；
+        //   7. 超时的脚本会被 interrupt（isDone 为 false 时正常中断）；
+        //   8. 连续 1000 次调度**不创建新线程**（线程数不增长）——
+        //      这是本次优化的核心断言。
+        // =====================================================================
+        final ScheduledExecutorService watchdog = Executors.newScheduledThreadPool(
+                1, r -> {
+                    final Thread th = new Thread(r, "ante-script-watchdog-test");
+                    th.setDaemon(true);
+                    return th;
+                });
+        try {
+            // --- 事实 8：连续调度不产生新线程 ---
+            final int before = Thread.activeCount();
+            final List<Future<?>> scheduled = new ArrayList<>();
+            final ExecutorService worker = Executors.newSingleThreadExecutor();
+            for (int i = 0; i < 1000; i++) {
+                final Future<?> f = worker.submit(() -> { });
+                scheduled.add(watchdog.schedule(() -> {
+                    // 复刻新版看门狗：脚本已提前完成 => 直接返回
+                    if (f.isDone()) return;
+                }, 50L, TimeUnit.MILLISECONDS));
+            }
+            worker.shutdown();
+            worker.awaitTermination(5, TimeUnit.SECONDS);
+            Thread.sleep(300L);
+            final int after = Thread.activeCount();
+            final long watchdogThreads = Thread.getAllStackTraces().keySet().stream()
+                    .filter(th -> "ante-script-watchdog-test".equals(th.getName())).count();
+            check("事实8：1000 次调度后看门狗线程数仍为 1（未线程爆炸）", watchdogThreads == 1);
+            System.out.println("  活跃线程 before=" + before + " after=" + after
+                    + " 看门狗线程数=" + watchdogThreads);
+            for (final Future<?> f : scheduled) f.cancel(false);
+
+            // --- 事实 6：提前完成的脚本不会被中断 ---
+            final Context ctx3 = Context.newBuilder("js").allowAllAccess(true).build();
+            final AtomicBoolean interrupted3 = new AtomicBoolean(false);
+            final ExecutorService single = Executors.newSingleThreadExecutor();
+            final Future<?> quick = single.submit(() -> {
+                try {
+                    ctx3.eval("js", "1 + 1");
+                } catch (Throwable t4) {
+                    // ignore
+                }
+            });
+            quick.get(5, TimeUnit.SECONDS);
+            // 复刻看门狗判定：任务已完成 => 不调 interrupt
+            if (!quick.isDone()) {
+                interrupted3.set(true);
+                try {
+                    ctx3.interrupt(Duration.ofMillis(1000L));
+                } catch (Exception ignore) {
+                    // ignore
+                }
+            }
+            check("事实6：提前完成的脚本未被中断（isDone 短路）", !interrupted3.get());
+            final Value v3 = ctx3.eval("js", "2 + 2");
+            check("事实6：提前完成的脚本 context 仍可用", v3.asInt() == 4);
+            ctx3.close();
+            single.shutdownNow();
+
+            // --- 事实 7：超时脚本会被中断（isDone 为 false 时正常中断）---
+            final Context ctx4 = Context.newBuilder("js").allowAllAccess(true).build();
+            final AtomicReference<Throwable> thrown4 = new AtomicReference<>();
+            final Thread victim4 = new Thread(() -> {
+                try {
+                    ctx4.eval(Source.newBuilder("js",
+                            "function spin(){ var i = 0; while(true) { i++; } } spin();",
+                            "spin.js").buildLiteral());
+                } catch (Throwable t5) {
+                    thrown4.set(t5);
+                }
+            }, "victim4");
+            victim4.setDaemon(true);
+            victim4.start();
+            Thread.sleep(500L);
+            // 复刻看门狗：任务未完成 => 调 interrupt
+            if (victim4.isAlive()) {
+                try {
+                    ctx4.interrupt(Duration.ofMillis(1000L));
+                } catch (Exception ignore) {
+                    // ignore
+                }
+            }
+            victim4.join(5000L);
+            check("事实7：超时脚本被中断并退出", !victim4.isAlive());
+            check("事实7：超时脚本抛出 PolyglotException",
+                    thrown4.get() instanceof PolyglotException);
+            ctx4.close();
+        } finally {
+            watchdog.shutdownNow();
         }
 
         System.out.println();

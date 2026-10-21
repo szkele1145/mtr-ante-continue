@@ -251,10 +251,14 @@ tasks.withType(JavaCompile) {
 //   2) Context.interrupt(Duration) 能在有限时间内中断它；
 //   3) 抛出 PolyglotException（ante 既有的 catch (Exception) 能接住）；
 //   4) 中断后 context 仍可继续执行后续脚本；
-//   5) 正常长脚本不会被误杀。
+//   5) 正常长脚本不会被误杀；
+// [验证 2026-10-21 continue.5] 看门狗线程爆炸优化的回归断言：
+//   6) 提前完成的脚本不会被中断（isDone 短路生效），context 仍可用；
+//   7) 超时脚本被中断并退出，抛 PolyglotException；
+//   8) 连续 1000 次调度后看门狗线程数仍为 1（未线程爆炸）。
 tasks.register('verifyScriptTimeout', JavaExec) {
     group = 'verification'
-    description = '验证审查项 #9：JS 脚本执行超时（Context.interrupt）'
+    description = '验证审查项 #9 与 continue.5 看门狗线程数断言（JS 脚本执行超时）'
 
     // GraalVM 依赖声明在 common 子项目（compileOnly），根项目没有 runtimeClasspath。
     // 且 org.graalvm.polyglot:js 是 POM-only 聚合件，真正的 JS 语言实现是

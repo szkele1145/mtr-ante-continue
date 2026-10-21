@@ -11,7 +11,7 @@ Aphrodite's Nemo's Transit Expansion (MTR-ANTE) 是一个基于 Minecraft Transi
 
 ## 状态
 
-**1.1.1-continue.2** — 四版本矩阵（1.18.2 / 1.19.2 / 1.19.4 / 1.20.1 × Fabric+Forge 合并包），
+**1.1.1-continue.5** — 四版本矩阵（1.18.2 / 1.19.2 / 1.19.4 / 1.20.1 × Fabric+Forge 合并包），
 已发布 [GitHub Releases](https://github.com/szkele1145/mtr-ante-continue/releases)
 与 Modrinth（审核中）。
 
@@ -23,6 +23,9 @@ Aphrodite's Nemo's Transit Expansion (MTR-ANTE) 是一个基于 Minecraft Transi
 | containsYSection 光照区间 | OR 形态（同层不重烘焙/无关层重建风暴）→ AND 重叠判定 |
 | Graal 24.x 沙箱 | 内部 API 断裂（作者 1.1.1 搁浅根因）→ RootedScriptFileSystem 根目录监狱 |
 | 滚转缓存失效（continue.2） | messagepack/packet 反序列化路径直接赋值绕过失效 → 双路径补失效 |
+| 代码审查 5 项（continue.3） | #7 CONFIG_INFO 双重转义 / #8 boundingBox volatile / #10 finishCallback finally / #11 删死代码 / #13 root toRealPath / #14 resetRunner awaitTermination |
+| JS 脚本执行超时（continue.4） | `while(true){}` 永久占住脚本线程 → 10s 看门狗 + GraalVM `Context.interrupt(Duration)` |
+| 看门狗线程爆炸（continue.5） | 每帧每脚本创建 120 线程/秒 → 静态 `ScheduledExecutorService` 恒 1 线程 |
 
 ### 与作者 DEV-1307 的关系
 

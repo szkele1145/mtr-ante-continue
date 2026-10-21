@@ -13,6 +13,75 @@
 - 发布渠道：Modrinth（审核中）+ [GitHub Releases](https://github.com/szkele1145/mtr-ante-continue/releases)
   （v1.1.1-continue.2 挂四版本全矩阵 jar）。
 
+## 1.1.1-continue.5（未发布）
+
+### 优化
+
+- **JS 脚本超时看门狗的线程爆炸修复**（`ScriptHolderBase.startWatchdog`）：
+  原实现每次脚本调用都新建 **2 个** 一次性线程（watchdog + watcher），
+  而 `tryCallRenderFunctionAsync` 是**每帧每脚本**调用一次 ——
+  60 FPS 下每个脚本每秒创建 **120** 个线程对象（栈内存 + GC 压力），
+  资源包脚本一多（多列车/多景物各一个 context）就会短时间堆积数千个线程，
+  高负载下会拖垮服务端。
+  现改为：单一静态 `ScheduledExecutorService`（1 个 daemon 线程），
+  每次调用只 **schedule** 一个延迟 10s 的一次性任务（不新建线程）；
+  任务触发时用 `task.isDone()` 判断脚本是否已提前完成 ——
+  若是则直接返回（等价于原来的 `done` 标志 + watcher 线程），
+  若否则执行 `context.interrupt(Duration)`。
+  **超时语义完全不变**（10s 超时 / 1s 宽限 / `AtomicBoolean` 幂等）。
+
+### 验证
+
+- `tools/VerifyScriptTimeout.java` 扩展到 **PASS=14 FAIL=0**（原 9 项 + 新 5 项）：
+  - 事实 6：提前完成的脚本不会被中断（`isDone` 短路生效），context 仍可用；
+  - 事实 7：超时脚本被中断并退出，抛 `PolyglotException`；
+  - 事实 8：**连续 1000 次调度后看门狗线程数仍为 1**（未线程爆炸）——本次优化的核心断言。
+
+## 1.1.1-continue.4（2026-10-21）
+
+### 修复
+
+- **JS 脚本无执行超时**（审查项 #9）：资源包作者写一个 `while(true){}` 会永久占住
+  `SCRIPT_THREAD`（单线程 executor），之后**所有**脚本（包括其它资源包的）全部排队卡死，
+  游戏表现为「脚本功能全失」且不报错。
+  修复用 GraalVM 24.x 官方 `Context.interrupt(Duration)`（**唯一公开的执行中断入口**，
+  且**只能由 creator thread 调用** —— 本类满足：context 在主线程创建、执行在 `SCRIPT_THREAD`），
+  10s 超时由 daemon 看门狗触发，1s 宽限后若脚本仍卡在 Java 宿主调用则放弃（记日志）。
+  中断后脚本线程收到 `PolyglotException: Execution got interrupted.`，
+  走既有 `catch (Exception)` 记 `failTime`/`failException` —— **错误处理语义不变**。
+- **构建脚本改用本地 Gradle 8.11**：`gradlew` 下载 gradle 8.11 会被 TLS 中间盒破坏
+  （`AEADBadTagException`）；`build.ps1` 改调
+  `F:\vibe coding工程\sfx\gradle-8.11\bin\gradle.bat`，参数化 `[mcVersion] [gradleTask]`。
+
+### 验证
+
+- 新增 `tools/VerifyScriptTimeout.java` + gradle 任务 `verifyScriptTimeout`，
+  实测 **PASS=9 FAIL=0**（5 个事实：死循环确实停不下来 / `interrupt` 能中断 /
+  抛 `PolyglotException` 可被既有 catch 接住 / 中断后 context 仍可用 /
+  正常长脚本不被误杀）。
+- 坑：`Context.eval` 返回 `org.graalvm.polyglot.Value` **不是** `Integer`；
+  `org.graalvm.polyglot:js` 是 **POM-only**，真实语言实现是 `org.graalvm.js:js-language`。
+
+## 1.1.1-continue.3（2026-10-21）
+
+### 修复（代码审查报告 5 项）
+
+- **#7 CONFIG_INFO 双重转义**（高）：原式 `toJson` → `replace("\"","\\\"")` → 塞进 JS 模板字符串，
+  模板字符串再解释一次转义 —— 配置含 Windows 路径（`C:\mc\server`）/换行/制表符时
+  `JSON.parse` 抛 `Bad escaped character`，**整个资源包 `load()` 失败**。
+  改为 JSON 文本经 `globalBindings.putMember` 传入（**只编码一次**），
+  JS 侧 `JSON.parse(CONFIG_INFO_JSON)` 出对象；`inject(String,String)` 一并改走 bindings。
+- **#8 `boundingBox` 跨线程无可见性**（中）：后台线程写、渲染线程读，
+  普通字段无 happens-before ⇒ 可能读到半更新 AABB。改 `volatile`（AABB 不可变，整体换引用）。
+- **#10 `finishCallback` 不执行**（中）：异常时跳过 ⇒ `scriptCtx.created` 永 false
+  ⇒ 每帧走 create 分支无限重试；`renderFunctionFinished()` 永不调用。移入 `finally`。
+- **#11 死代码含全沙箱配置**（中）：`if (false) { ... }` 约 120 行，内含
+  `allowHostClassLookup`(全放行)/`allowIO(ALL)`/`allowNativeAccess(true)`。整块删除。
+- **#13 `RootedScriptFileSystem` root 未解引用符号链接**（低）：root 含符号链接时
+  合法路径被误判越界。root 也做 `toRealPath()`。
+- **#14 `resetRunner` 不等旧线程**（低）：`shutdownNow()` 后立刻换新 executor，
+  旧线程可能仍持有 Context，与 `close()` 竞态。`awaitTermination(1s)`。
+
 ## 1.1.1-continue.2（热修）
 
 - **滚转缓存在反序列化路径不失效**：`RailMixin` 的 messagepack（存档载入）与

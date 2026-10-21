@@ -70,3 +70,6 @@ artifacts/
 
 # CI workflows (token scope)
 .github/workflows/
+
+# 发布暂存目录
+release-*/

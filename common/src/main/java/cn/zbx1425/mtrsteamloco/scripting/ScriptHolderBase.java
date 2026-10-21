@@ -43,6 +43,15 @@ public abstract class ScriptHolderBase {
 
     private static ExecutorService SCRIPT_THREAD = Executors.newSingleThreadExecutor();
 
+    // [优化 2026-10-21] 看门狗调度器：单 daemon 线程，避免每次调用创建 2 个一次性线程
+    //（tryCallRenderFunctionAsync 每帧每脚本一次，60 FPS 下原实现每秒创建 120 个线程/脚本）。
+    private static final ScheduledExecutorService WATCHDOG = Executors.newScheduledThreadPool(
+            1, r -> {
+                final Thread t = new Thread(r, "ante-script-watchdog");
+                t.setDaemon(true);
+                return t;
+            });
+
     public final String side;
     private Context context; 
     private Value globalBindings; 
@@ -362,55 +371,50 @@ public abstract class ScriptHolderBase {
      * <p>
      * 已经在跑/已超时的脚本不会重复中断：{@code interrupted} 标志用
      * {@link AtomicBoolean} 保证只置位一次。
+     * <p>
+     * <b>[优化 2026-10-21] 线程爆炸修复</b>：原实现每次调用都新建 **2 个** 线程
+     * （watchdog + watcher），而 {@code tryCallRenderFunctionAsync} 是**每帧每脚本**
+     * 调用一次 ⇒ 60 FPS 下每脚本每秒创建 120 个线程，短时间产生数千个线程对象
+     * （栈内存 + GC 压力），高负载下会拖垮服务端。
+     * <p>
+     * 现改为：单一静态 {@link ScheduledExecutorService}（1 个 daemon 线程），
+     * 每次调用只 <b>schedule</b> 一个延迟 10s 的一次性任务（不新建线程）；
+     * 任务触发时用 {@code task.isDone()} 判断脚本是否已提前完成 ——
+     * 若是则直接返回（等价于原来的 done 标志 + watcher 线程），
+     * 若否则执行 interrupt。这样"提前完成时取消看门狗"不再需要阻塞等待的第二个线程。
      */
     private void startWatchdog(Future<?> task, AbstractScriptContext scriptCtx) {
-        final AtomicBoolean done = new AtomicBoolean(false);
         final AtomicBoolean interrupted = new AtomicBoolean(false);
         final long deadline = System.nanoTime() + SCRIPT_TIMEOUT_NANOS;
 
-        final Thread watchdog = new Thread(() -> {
-            try {
-                while (!done.get()) {
-                    if (System.nanoTime() - deadline >= 0) break;
-                    Thread.sleep(20L);
-                }
-                if (done.get()) return;
-                if (!interrupted.compareAndSet(false, true)) return;
-
-                final Context ctx = context;
-                if (ctx == null) return;
-                Main.LOGGER.error("ANTE script timed out after {} ms, interrupting execution", SCRIPT_TIMEOUT_MILLIS);
+        try {
+            WATCHDOG.schedule(() -> {
                 try {
-                    // interrupt 内部有等待时限：若脚本线程此刻没在 polyglot 代码里
-                    // （例如卡在 Java 宿主调用），interrupt 会抛 TimeoutException。
-                    ctx.interrupt(Duration.ofMillis(INTERRUPT_GRACE_MILLIS));
-                } catch (TimeoutException e) {
-                    Main.LOGGER.error("ANTE script interrupt timed out (script may be stuck in a host call)");
-                } catch (Exception e) {
-                    Main.LOGGER.error("Error interrupting ANTE script", e);
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            } finally {
-                // 无论成功、超时还是被打断，都保证唤醒下一个看门狗能观察到完成。
-                done.set(true);
-            }
-        }, "ante-script-watchdog");
-        watchdog.setDaemon(true);
-        watchdog.start();
+                    // 脚本已提前完成 => 无需中断（原 watcher 线程的职责）
+                    if (task.isDone()) return;
+                    if (System.nanoTime() - deadline < 0) return;
+                    if (!interrupted.compareAndSet(false, true)) return;
 
-        // 任务提前结束 -> 让看门狗自行退出（done 标志）
-        final Thread watcher = new Thread(() -> {
-            try {
-                task.get();
-            } catch (Exception ignored) {
-                // 任务异常/取消时也要唤醒看门狗
-            } finally {
-                done.set(true);
-            }
-        }, "ante-script-watcher");
-        watcher.setDaemon(true);
-        watcher.start();
+                    final Context ctx = context;
+                    if (ctx == null) return;
+                    Main.LOGGER.error("ANTE script timed out after {} ms, interrupting execution", SCRIPT_TIMEOUT_MILLIS);
+                    try {
+                        // interrupt 内部有等待时限：若脚本线程此刻没在 polyglot 代码里
+                        // （例如卡在 Java 宿主调用），interrupt 会抛 TimeoutException。
+                        ctx.interrupt(Duration.ofMillis(INTERRUPT_GRACE_MILLIS));
+                    } catch (TimeoutException e) {
+                        Main.LOGGER.error("ANTE script interrupt timed out (script may be stuck in a host call)");
+                    } catch (Exception e) {
+                        Main.LOGGER.error("Error interrupting ANTE script", e);
+                    }
+                } catch (Exception e) {
+                    Main.LOGGER.error("Error in ANTE script watchdog", e);
+                }
+            }, SCRIPT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+        } catch (Exception e) {
+            // 调度失败（如 executor 已关闭）：不影响脚本正常执行
+            Main.LOGGER.warn("Failed to schedule ANTE script watchdog: " + e.getMessage());
+        }
     }
 
     public void tryCallFunctionAsync(String function, AbstractScriptContext scriptCtx, Runnable callback, Object... args) {
@@ -459,8 +463,11 @@ public abstract class ScriptHolderBase {
     }
 
     public void close() {
-        // [修复 2026-10-21] 审查项 #9：close 之前先让在跑的超时看门狗失效，
-        // 否则它可能在 context 已关闭后再调 interrupt()。
+        // [修复 2026-10-21] 审查项 #9：close 之后在跑的看门狗不得再调 interrupt()。
+        // 失效机制：看门狗任务在 interrupt 前会取 this.context 并判空，
+        // 这里先 close() 再置 null ⇒ 迟到的看门狗拿到 null 直接 return。
+        // （continue.5 改为 ScheduledExecutorService 后语义不变：任务触发时
+        //   仍会重读 this.context，不会持有旧的 Context 强引用。）
         if (context != null) {
             context.close();
             context = null;
