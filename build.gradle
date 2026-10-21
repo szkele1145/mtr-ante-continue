@@ -309,4 +309,46 @@ tasks.register('verifyScriptTimeout', JavaExec) {
     mainClass = 'VerifyScriptTimeout'
 }
 
+// [验证 2026-10-22 continue.6] 滚转排序缓存的**并发可见性**与**数组配对**保证。
+// 独立 Java 程序（不依赖 MC、不依赖 GraalVM），验证：
+//   1) 旧的双字段实现（写端 values→keys / 读端 keys→values，均无 volatile）
+//      在读写交错下能观察到「长度不一致的数组对」；
+//   2) 旧实现在同场景下能复现 AIOOBE（越界）与 NPE（读到 null）；
+//   3) 新的「不可变 holder + 单 volatile 字段」实现**永远配对**、无异常；
+//   4) holder 失效（置 null）后能读到新数据（可见性语义正确）。
+tasks.register('verifyRollCacheVisibility', JavaExec) {
+    group = 'verification'
+    description = '验证 continue.6 滚转排序缓存的并发可见性与数组配对（不依赖 MC / GraalVM）'
+
+    def srcFile = file('tools/VerifyRollCacheVisibility.java')
+    def outDir = layout.buildDirectory.dir('verify-roll-cache').get().asFile
+
+    inputs.file(srcFile)
+    outputs.dir(outDir)
+
+    doFirst {
+        outDir.mkdirs()
+        def compiler = javax.tools.ToolProvider.getSystemJavaCompiler()
+        if (compiler == null) {
+            throw new GradleException('需要 JDK（不是 JRE）来编译 VerifyRollCacheVisibility.java')
+        }
+        def fileManager = compiler.getStandardFileManager(null, null, null)
+        def units = fileManager.getJavaFileObjects(srcFile)
+        def options = [
+                '-d', outDir.absolutePath,
+                '-encoding', 'UTF-8',
+                '-nowarn'
+        ] as List
+        def task = compiler.getTask(null, fileManager, null, options, null, units)
+        def ok = task.call()
+        fileManager.close()
+        if (!ok) {
+            throw new GradleException('VerifyRollCacheVisibility.java 编译失败')
+        }
+    }
+
+    classpath = files(outDir.toURI())
+    mainClass = 'VerifyRollCacheVisibility'
+}
+
 

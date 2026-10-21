@@ -26,6 +26,7 @@ Aphrodite's Nemo's Transit Expansion (MTR-ANTE) 是一个基于 Minecraft Transi
 | 代码审查 5 项（continue.3） | #7 CONFIG_INFO 双重转义 / #8 boundingBox volatile / #10 finishCallback finally / #11 删死代码 / #13 root toRealPath / #14 resetRunner awaitTermination |
 | JS 脚本执行超时（continue.4） | `while(true){}` 永久占住脚本线程 → 10s 看门狗 + GraalVM `Context.interrupt(Duration)` |
 | 看门狗线程爆炸（continue.5） | 每帧每脚本创建 120 线程/秒 → 静态 `ScheduledExecutorService` 恒 1 线程 |
+| 滚转缓存并发缺陷（continue.6） | 双字段读写顺序相反 + 无 volatile ⇒ AIOOBE 越界 / NPE → 不可变 holder + 单 `volatile` 字段原子发布 |
 
 ### 与作者 DEV-1307 的关系
 

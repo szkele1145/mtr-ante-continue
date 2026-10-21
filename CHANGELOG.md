@@ -13,7 +13,50 @@
 - 发布渠道：Modrinth（审核中）+ [GitHub Releases](https://github.com/szkele1145/mtr-ante-continue/releases)
   （v1.1.1-continue.2 挂四版本全矩阵 jar）。
 
-## 1.1.1-continue.5（未发布）
+## 1.1.1-continue.6
+
+### 修复
+
+- **★ 滚转排序缓存的并发可见性与数组配对缺陷**（`RailMixin`）：
+  旧实现把滚转排序缓存拆成**两个独立字段**
+  （`nteSortedRollKeys` / `nteSortedRollValues`），存在两个真实问题：
+  1. **读写顺序相反** —— 写端 `nteRebuildRollCache()` 先赋 `values` 再赋 `keys`，
+     读端 `RailExtraSupplier.getRollAngle()` 先取 `keys` 再取 `values`。
+     ⇒ 渲染线程可能观察到「**新 keys + 旧 values**」，两个数组长度不一致
+     ⇒ `values[idx]` **越界（AIOOBE）**。
+  2. **无 `volatile`** ⇒ 编辑线程的失效写入对渲染线程**不可见**
+     （无 happens-before）⇒ 滚转数据可能不更新；
+     且 `nte$getSortedRollKeys()` 在 `invalidate` 与 `rebuild` 之间**可能返回 null**
+     ⇒ `getRollAngle` 里 `keys.length` **NPE**。
+  修法：把两个数组放进**不可变 holder**（`NteRollCache`），
+  用**单个 `volatile` 字段**发布 ——
+  volatile 写 = happens-before ⇒ 可见性保证；
+  单字段发布 ⇒ keys 与 values **必然来自同一次重建、长度必然一致**。
+  失效点从「置两个字段 null」简化为「置一个字段 null」
+  （`setRollAngleMap` / messagepack 反序列化 / 网络包反序列化 三处）。
+
+### 验证
+
+- 新增 `tools/VerifyRollCacheVisibility.java`（独立 Java 程序，不依赖 MC / GraalVM），
+  并接入 gradle 任务 `verifyRollCacheVisibility`：**PASS=8 FAIL=0**。
+  压力测试（写线程持续重建 + 读线程按生产代码顺序取用）证明：
+  - 旧的双字段实现能观察到「长度不一致的数组对」（缺陷真实存在）；
+  - 旧实现能复现 **AIOOBE**（`Index 2 out of bounds for length 2`，
+    即「新 keys 长度 3 + 旧 values 长度 2」的真实崩溃场景）；
+  - 新的 holder 实现**永远配对**、无越界；
+  - holder 失效后能读到新数据（可见性语义正确）。
+
+### 文档更正
+
+- 更正此前记录中关于「滚转缓存按轨道实例整体重建、编辑单条轨道会连带失效相邻轨道」
+  的**错误描述**：逐行核实 `RailMixin` 后确认，滚转缓存本来就是
+  **`RailMixin` 的 per-实例字段**，惰性重建、**只在本轨道自己的
+  `setRollAngleMap` 时失效** ⇒ 粒度已经是最细的，**不存在**跨轨道连带失效。
+  （历史上真正的跨轨道污染是 continue.2 修的另一个问题：
+  messagepack / 网络包反序列化路径**绕过**失效 ⇒ 沿用**上一条轨道**的缓存快照；
+  两条路径当时都已补上失效。）
+
+## 1.1.1-continue.5（2026-10-22）
 
 ### 优化
 

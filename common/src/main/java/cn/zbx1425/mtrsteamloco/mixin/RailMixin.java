@@ -112,28 +112,63 @@ public abstract class RailMixin implements RailExtraSupplier {
     public void setRollAngleMap(Map<Double, Float> rollAngleMap) {
         this.rollAngleMap = rollAngleMap;
         // [续更优化] 数据变更时使排序缓存失效，下次查询惰性重建
-        this.nteSortedRollKeys = null;
-        this.nteSortedRollValues = null;
+        this.nteSortedRoll = null;
     }
 
     // [续更优化] 滚转查询热路径缓存：多车多线存档下 getRollAngle 每帧调用上千次，
     // 原实现每次调用都要装箱排序整个 Map，是可测量的 GC 压力来源
-    private double[] nteSortedRollKeys = null;
-    private float[] nteSortedRollValues = null;
+    //
+    // [continue.6 修复] ★ 改为**单个 volatile holder 原子发布**两个数组。
+    // 旧实现是两个独立字段（nteSortedRollKeys / nteSortedRollValues），且
+    // **写端顺序（values → keys）与读端顺序（keys → values）相反**：
+    //   写：nteRebuildRollCache() 先赋 values 再赋 keys
+    //   读：getRollAngle() 先取 keys 再取 values
+    // ⇒ 渲染线程可能观察到**新 keys + 旧 values** 两个数组，
+    //   两者长度不一致 ⇒ values[idx] **越界（AIOOBE）**。
+    // 且两字段都**无 volatile** ⇒ 渲染线程可能永远看不到编辑线程的失效写入
+    // ⇒ 滚转数据不更新（无 happens-before）。
+    //
+    // 修法：把两个数组放进**不可变 holder**，用**单个 volatile 字段**发布。
+    // volatile 写 = happens-before ⇒ 可见性保证；
+    // 单字段发布 ⇒ keys 与 values 必然来自同一次重建，长度必然一致。
+    private volatile NteRollCache nteSortedRoll = null;
+
+    /** [continue.6] 滚转排序缓存的不可变 holder（keys 与 values 必然同源同长） */
+    private static final class NteRollCache {
+        final double[] keys;
+        final float[] values;
+
+        NteRollCache(double[] keys, float[] values) {
+            this.keys = keys;
+            this.values = values;
+        }
+    }
 
     @Override
     public double[] nte$getSortedRollKeys() {
-        if (nteSortedRollKeys == null) nteRebuildRollCache();
-        return nteSortedRollKeys;
+        return nte$rollCache().keys;
     }
 
     @Override
     public float[] nte$getSortedRollValues() {
-        if (nteSortedRollValues == null) nteRebuildRollCache();
-        return nteSortedRollValues;
+        return nte$rollCache().values;
     }
 
-    private void nteRebuildRollCache() {
+    /**
+     * [continue.6] 取（必要时重建）滚转排序缓存。
+     * <p>
+     * 惰性重建 + 单字段 volatile 发布 ⇒ 线程安全且 keys/values 必然配对。
+     */
+    private NteRollCache nte$rollCache() {
+        NteRollCache cache = this.nteSortedRoll;
+        if (cache == null) {
+            cache = nteRebuildRollCache();
+            this.nteSortedRoll = cache;
+        }
+        return cache;
+    }
+
+    private NteRollCache nteRebuildRollCache() {
         final java.util.TreeMap<Double, Float> sorted = new java.util.TreeMap<>(rollAngleMap);
         final double[] ks = new double[sorted.size()];
         final float[] vs = new float[sorted.size()];
@@ -143,8 +178,7 @@ public abstract class RailMixin implements RailExtraSupplier {
             vs[i] = e.getValue();
             i++;
         }
-        this.nteSortedRollValues = vs;
-        this.nteSortedRollKeys = ks;
+        return new NteRollCache(ks, vs);
     }
 
     @Override
@@ -475,8 +509,8 @@ public abstract class RailMixin implements RailExtraSupplier {
         }
         // [续更修复] 反序列化直接写字段绕过了 setRollAngleMap 的缓存失效——
         // 必须同步清空排序缓存，否则查询继续返回旧数据的快照（新滚转不生效）
-        this.nteSortedRollKeys = null;
-        this.nteSortedRollValues = null;
+        // [continue.6] 缓存改为单字段 holder，失效只需置 null
+        this.nteSortedRoll = null;
         openingDirection = messagePackHelper.getInt("opening_direction", 0);
         rollingOffset = messagePackHelper.getFloat("rolling_offset", 1.435F / 2F);
         pathMode = messagePackHelper.getInt("path_mode", 0);
@@ -555,8 +589,8 @@ public abstract class RailMixin implements RailExtraSupplier {
             rollAngleMap = new HashMap<>();
         }
         // [续更修复] 同上：网络反序列化路径的缓存失效
-        this.nteSortedRollKeys = null;
-        this.nteSortedRollValues = null;
+        // [continue.6] 缓存改为单字段 holder，失效只需置 null
+        this.nteSortedRoll = null;
         openingDirection = packet.readInt();
         rollingOffset = packet.readFloat();
         pathMode = packet.readInt();
