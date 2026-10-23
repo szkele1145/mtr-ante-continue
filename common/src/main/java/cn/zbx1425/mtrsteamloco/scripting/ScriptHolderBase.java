@@ -80,9 +80,6 @@ public abstract class ScriptHolderBase {
         "java.awt", "java.util", "mtr"
     );
 
-    // [修复 2026-10-21] 审查项 #9：JS 脚本执行超时。
-    // 默认 10 秒：正常脚本（render 回调）远小于此值；死循环脚本会被看门狗中断。
-    private static final long SCRIPT_TIMEOUT_MILLIS = 10_000L;
     // context.interrupt() 的等待时限：脚本线程此刻若不在 polyglot 代码里
     // （卡在 Java 宿主调用），interrupt 会抛 TimeoutException。
     private static final long INTERRUPT_GRACE_MILLIS = 1_000L;

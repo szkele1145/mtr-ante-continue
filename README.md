@@ -11,7 +11,7 @@ Aphrodite's Nemo's Transit Expansion (MTR-ANTE) 是一个基于 Minecraft Transi
 
 ## 状态
 
-**1.1.1-continue.5** — 四版本矩阵（1.18.2 / 1.19.2 / 1.19.4 / 1.20.1 × Fabric+Forge 合并包），
+**1.1.1-continue.7** — 四版本矩阵（1.18.2 / 1.19.2 / 1.19.4 / 1.20.1 × Fabric+Forge 合并包），
 已发布 [GitHub Releases](https://github.com/szkele1145/mtr-ante-continue/releases)
 与 Modrinth（审核中）。
 
@@ -27,6 +27,8 @@ Aphrodite's Nemo's Transit Expansion (MTR-ANTE) 是一个基于 Minecraft Transi
 | JS 脚本执行超时（continue.4） | `while(true){}` 永久占住脚本线程 → 10s 看门狗 + GraalVM `Context.interrupt(Duration)` |
 | 看门狗线程爆炸（continue.5） | 每帧每脚本创建 120 线程/秒 → 静态 `ScheduledExecutorService` 恒 1 线程 |
 | 滚转缓存并发缺陷（continue.6） | 双字段读写顺序相反 + 无 volatile ⇒ AIOOBE 越界 / NPE → 不可变 holder + 单 `volatile` 字段原子发布 |
+| 脚本预算自适应（continue.7） | 固定 10s 墙钟会误杀合法慢脚本、且日志与死循环无法区分 → 只有「已成功完成过」的脚本才允许 `clamp(4×历史最长成功耗时, 10s, 60s)`；未完成过恒 10s（死循环不放生） |
+| 测试偶发假失败（continue.7） | `VerifyScriptTimeout` 靠固定 `sleep(500)` 等脚本进入 polyglot，负载高时 5 条断言随机失败 → 改由 JS 回调 `__enterLoop()` 握手 |
 
 ### 与作者 DEV-1307 的关系
 

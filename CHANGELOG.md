@@ -13,6 +13,64 @@
 - 发布渠道：Modrinth（审核中）+ [GitHub Releases](https://github.com/szkele1145/mtr-ante-continue/releases)
   （v1.1.1-continue.2 挂四版本全矩阵 jar）。
 
+## 1.1.1-continue.7
+
+### 新增
+
+- **★ 脚本执行预算自适应：区分「慢脚本」与「死循环」**。
+  原先看门狗是**固定 10 秒**墙钟超时 ⇒ 一个合法但重的脚本（例如首次构建几何体
+  要 12 秒）会和死循环一样被砍掉，且日志里两者长得一模一样，作者无法判断
+  到底是自己写慢了还是写错了。
+
+  判据：**只有已经成功完成过的脚本，才允许超过基础预算。**
+
+  | 情形 | 预算 | 理由 |
+  |---|---|---|
+  | 从未成功完成（`successfulRuns < 2`） | 恒定 **10 s** | 死循环第一次就爆，不会被「自适应」放生 |
+  | 已有成功历史 | `clamp(4 × 历史最长成功耗时, 10 s, 60 s)` | 慢脚本按自己的历史水平拿到余量 |
+
+  只有「成功完成」的那次计入历史：失败/被中断的耗时若也计入，死循环会把
+  自己的超时时长当成「历史最长耗时」，不断抬高自己的预算 —— **自我放生**。
+
+  乘 4 而非 2：render 回调耗时抖动大（GC、区块加载、首次 JIT），2 倍容易反复误杀。
+  上限 60 s：再长的单次调用是设计问题，且脚本线程是**单线程**（一个脚本卡住会拖住全部）。
+
+  日志现在一眼能分辨：
+
+  ```
+  # 慢脚本
+  ANTE script is slow: exceeded its adaptive budget of 20000 ms
+    (base 10000 ms, 5 successful runs, longest successful run 5000 ms)
+
+  # 疑似死循环
+  ANTE script timed out after 10000 ms with no successful run on record
+    (0 completed run(s) so far) - likely an infinite loop
+  ```
+
+- 新增 `ScriptBudgetPolicy`（`scripting` 包）：预算算法单独成类，
+  **纯函数、零依赖，不引用 MC / GraalVM**。之所以抽出来是因为
+  `ScriptHolderBase` 依赖 MC 与 GraalVM、离屏无法加载，而「预算怎么算」
+  恰恰最需要回归；抽出来后 `tools/VerifyScriptTimeout.java` 直接调用
+  **生产代码**，不复制参考实现，避免测试与实现悄悄分叉。
+
+### 修复
+
+- **`VerifyScriptTimeout` 的偶发假失败**（continue.6 起就存在）：
+  事实 2/3/4 原先靠 `started2.countDown()` + 固定 `Thread.sleep(500)`
+  来「等脚本跑起来」。机器负载高时（gradle daemon + 后台构建）victim 线程
+  可能还没进入 polyglot 执行体，`interrupt` 就找不到可中断的目标，
+  或 1 秒等待窗口在排队中耗尽 ⇒ 5 条断言随机失败（实测遇到过一次）。
+  改为**由 JS 自己回报**：脚本进入循环前调用宿主回调 `__enterLoop()`，
+  主线程 `await` 该 latch 再 interrupt —— 何时可中断由事实决定，
+  不再由「猜一个睡够的时长」决定。
+
+### 验证
+
+- `verifyScriptTimeout` **PASS=26 FAIL=0**（continue.6 = 14，+12），连跑 4 次稳定。
+- 新增断言涵盖：无成功历史恒基础预算（0 次 / 1 次 / 无耗时样本 / 负数样本）、
+  4 倍放大、下限抬升、上限夹取，以及两条不变式（预算恒在 [10 s, 60 s]、
+  耗时样本越大预算不减）。
+
 ## 1.1.1-continue.6
 
 ### 修复
