@@ -351,4 +351,86 @@ tasks.register('verifyRollCacheVisibility', JavaExec) {
     mainClass = 'VerifyRollCacheVisibility'
 }
 
+tasks.register('auditMixinInjectors', JavaExec) {
+    group = 'verification'
+    description = '审计全部 mixin 注入器的 method= 描述符在 4 个 MC 版本的目标 jar 中是否真实存在（防 turbo 1.1.7 那类"描述符永不匹配"的静默失效）'
+
+    def srcFile = file('tools/AuditAnteMixins.java')
+    def outDir = layout.buildDirectory.dir('verify-mixin-audit').get().asFile
+    // 目标 jar：checkouts/<ver>/mtr-common.jar + loom 缓存的 MC jar
+    def targetRoot = layout.buildDirectory.dir('verify-mixin-targets').get().asFile
+
+    inputs.file(srcFile)
+    outputs.dir(outDir)
+
+    doFirst {
+        outDir.mkdirs()
+
+        // 1) 组装目标目录：每版本一个子目录，含 mtr-common.jar + mc.jar
+        def versions = ['1.18.2', '1.19.2', '1.19.4', '1.20.1']
+        def mcToken = ['1.18.2': '1_18_2', '1.19.2': '1_19_2', '1.19.4': '1_19_4', '1.20.1': '1_20_1']
+        targetRoot.mkdirs()
+        versions.each { v ->
+            def dir = new File(targetRoot, v)
+            dir.mkdirs()
+            def src = new File(projectDir, "checkouts/${v}/mtr-common.jar")
+            if (!src.exists()) {
+                throw new GradleException("缺少目标 jar: ${src}")
+            }
+            java.nio.file.Files.copy(src.toPath(), new File(dir, 'mtr-common.jar').toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            // MC jar 从 loom 缓存里按映射版本挑一个
+            def mcJar = null
+            def cur = new File(projectDir, '.gradle/loom-cache/minecraftMaven')
+            if (cur.isDirectory()) {
+                cur.eachFileRecurse { f ->
+                    if (mcJar == null && f.isFile() && f.name.startsWith('minecraft-merged-')
+                            && f.name.endsWith('.jar') && f.name.contains(mcToken[v])) {
+                        mcJar = f
+                    }
+                }
+            }
+            if (mcJar != null) {
+                java.nio.file.Files.copy(mcJar.toPath(), new File(dir, 'mc.jar').toPath(),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            } else {
+                logger.warn("!! ${v} 未找到 MC jar，MC 目标类将报缺失（预期盲区）")
+            }
+        }
+
+        // 2) 编译审计器（需要 ASM）
+        def asmCfg = configurations.detachedConfiguration(
+                dependencies.create('org.ow2.asm:asm:9.7.1'),
+                dependencies.create('org.ow2.asm:asm-tree:9.7.1')
+        )
+        asmCfg.transitive = false
+        def asmCp = asmCfg.files.collect { it.absolutePath }.join(File.pathSeparator)
+
+        def compiler = javax.tools.ToolProvider.getSystemJavaCompiler()
+        if (compiler == null) {
+            throw new GradleException('需要 JDK（不是 JRE）来编译 AuditAnteMixins.java')
+        }
+        def fileManager = compiler.getStandardFileManager(null, null, null)
+        def units = fileManager.getJavaFileObjects(srcFile)
+        def options = ['-d', outDir.absolutePath, '-cp', asmCp, '-encoding', 'UTF-8', '-nowarn'] as List
+        def task = compiler.getTask(null, fileManager, null, options, null, units)
+        def ok = task.call()
+        fileManager.close()
+        if (!ok) {
+            throw new GradleException('AuditAnteMixins.java 编译失败')
+        }
+
+        // 3) 运行
+        def asmCfg2 = configurations.detachedConfiguration(
+                dependencies.create('org.ow2.asm:asm:9.7.1'),
+                dependencies.create('org.ow2.asm:asm-tree:9.7.1')
+        )
+        asmCfg2.transitive = false
+        classpath = files(outDir) + asmCfg2
+        args = [targetRoot.absolutePath, new File(projectDir, 'common/src/main/java/cn/zbx1425/mtrsteamloco/mixin').absolutePath]
+    }
+
+    mainClass = 'AuditAnteMixins'
+}
+
 
