@@ -25,6 +25,9 @@ import org.graalvm.polyglot.PolyglotException;
 import org.graalvm.polyglot.Source;
 import org.graalvm.polyglot.Value;
 
+// [continue.7] 预算策略的生产实现（纯函数、零依赖），本测试直接调用它
+import cn.zbx1425.mtrsteamloco.scripting.ScriptBudgetPolicy;
+
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -66,14 +69,29 @@ public final class VerifyScriptTimeout {
         check("事实1：未自行结束", !finishedWithoutInterrupt.get());
 
         // --- 事实 2 & 3：creator thread 调 interrupt(Duration) 能中断它 ---
+        //
+        // ★ 稳定性修复（continue.7）：原实现用 `started2.countDown()` + 固定
+        //   `Thread.sleep(500)` 来「等脚本跑起来」。这两者在机器负载高时都不可靠
+        //   （曾被 gradle daemon + 后台构建拖到 5 条断言随机失败）：
+        //   victim2 可能还没进入 polyglot 执行体，interrupt 就找不到可中断的目标，
+        //   或者 1s 的等待窗口在排队中耗尽 ⇒ TimeoutException ⇒ 假失败。
+        //
+        //   改为**由 JS 自己回报**：脚本进入循环前调用宿主回调 __enterLoop()，
+        //   主线程 await 这个 latch 再 interrupt。这样「何时可以中断」由事实决定，
+        //   不再由猜测的睡够时长决定。
         final Context ctx = Context.newBuilder("js").allowAllAccess(true).build();
         final AtomicReference<Throwable> thrown = new AtomicReference<>();
+        final CountDownLatch inJsLoop = new CountDownLatch(1);
+        ctx.getBindings("js").putMember("__enterLoop", (org.graalvm.polyglot.proxy.ProxyExecutable) a -> {
+            inJsLoop.countDown();
+            return null;
+        });
         final CountDownLatch started2 = new CountDownLatch(1);
         final Thread victim2 = new Thread(() -> {
             try {
                 started2.countDown();
                 ctx.eval(Source.newBuilder("js",
-                        "function spin(){ var i = 0; while(true) { i++; } } spin();",
+                        "function spin(){ __enterLoop(); var i = 0; while(true) { i++; } } spin();",
                         "spin.js").buildLiteral());
             } catch (Throwable t) {
                 thrown.set(t);
@@ -82,7 +100,9 @@ public final class VerifyScriptTimeout {
         victim2.setDaemon(true);
         victim2.start();
         started2.await(5, TimeUnit.SECONDS);
-        Thread.sleep(500L);
+        // 等到脚本**确实**已进入 polyglot 循环（不是靠睡够时长）
+        final boolean entered = inJsLoop.await(15, TimeUnit.SECONDS);
+        check("事实2：脚本已进入 polyglot 循环（握手成功）", entered);
 
         final long t0 = System.nanoTime();
         boolean interrupted = false;
@@ -235,6 +255,55 @@ public final class VerifyScriptTimeout {
             ctx4.close();
         } finally {
             watchdog.shutdownNow();
+        }
+
+        // ───────────────────────────────────────────────────────────────────
+        // [continue.7] 预算策略：把「慢脚本」与「死循环」区分开
+        //
+        // 直接调用生产代码 cn.zbx1425.mtrsteamloco.scripting.ScriptBudgetPolicy
+        // （纯函数、零依赖），而不是复制一份参考实现 —— 避免测试与实现分叉。
+        // ───────────────────────────────────────────────────────────────────
+        System.out.println();
+        System.out.println("[ScriptBudgetPolicy]");
+        {
+            final long base = ScriptBudgetPolicy.BASE_MILLIS;
+            final long max = ScriptBudgetPolicy.MAX_MILLIS;
+
+            // 安全底线：没有成功历史 ⇒ 永远基础预算（死循环不能被放生）
+            check("无成功历史（0 次）⇒ 基础预算",
+                    ScriptBudgetPolicy.budgetMillis(0, 0L) == base);
+            check("无成功历史（1 次）⇒ 基础预算",
+                    ScriptBudgetPolicy.budgetMillis(1, 30_000L * 1_000_000L) == base);
+            check("有成功次数但没有耗时样本 ⇒ 基础预算",
+                    ScriptBudgetPolicy.budgetMillis(10, 0L) == base);
+            check("负数耗时样本 ⇒ 基础预算",
+                    ScriptBudgetPolicy.budgetMillis(10, -1L) == base);
+
+            // 慢脚本：按 4 倍历史、夹在 [base, max]
+            check("历史 1s × 4 = 4s < base ⇒ 抬到 base（不降级）",
+                    ScriptBudgetPolicy.budgetMillis(2, 1_000L * 1_000_000L) == base);
+            check("历史 3s × 4 = 12s ⇒ 12s",
+                    ScriptBudgetPolicy.budgetMillis(2, 3_000L * 1_000_000L) == 12_000L);
+            check("历史 5s × 4 = 20s ⇒ 20s",
+                    ScriptBudgetPolicy.budgetMillis(5, 5_000L * 1_000_000L) == 20_000L);
+            check("历史 20s × 4 = 80s ⇒ 夹到上限 60s",
+                    ScriptBudgetPolicy.budgetMillis(3, 20_000L * 1_000_000L) == max);
+            check("历史超长（10 分钟）⇒ 仍是上限 60s",
+                    ScriptBudgetPolicy.budgetMillis(9, 600_000L * 1_000_000L) == max);
+
+            // 不变式：预算恒在 [base, max]，且对成功次数单调不减
+            boolean inRange = true;
+            boolean monotonic = true;
+            long prev = -1L;
+            final long[] samples = {0L, 1L, 999L, 1_000L, 2_500L, 5_000L, 15_000L, 60_000L, 600_000L};
+            for (long ms : samples) {
+                final long b = ScriptBudgetPolicy.budgetMillis(4, ms * 1_000_000L);
+                if (b < base || b > max) inRange = false;
+                if (b < prev) monotonic = false;
+                prev = b;
+            }
+            check("不变式：预算恒在 [base, max] 内", inRange);
+            check("不变式：耗时样本越大，预算不减", monotonic);
         }
 
         System.out.println();

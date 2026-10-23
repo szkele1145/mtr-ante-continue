@@ -274,9 +274,13 @@ tasks.register('verifyScriptTimeout', JavaExec) {
     def cp = graalCp.files.collect { it.absolutePath }.join(File.pathSeparator)
 
     def srcFile = file('tools/VerifyScriptTimeout.java')
+    // [continue.7] 预算策略被抽成纯函数类（零依赖），单独编译进来，
+    // 让离屏测试直接调用**生产代码**而不是复制一份参考实现。
+    def policyFile = file('common/src/main/java/cn/zbx1425/mtrsteamloco/scripting/ScriptBudgetPolicy.java')
     def outDir = layout.buildDirectory.dir('verify-script-timeout').get().asFile
 
     inputs.file(srcFile)
+    inputs.file(policyFile)
     outputs.dir(outDir)
 
     doFirst {
@@ -288,7 +292,7 @@ tasks.register('verifyScriptTimeout', JavaExec) {
             throw new GradleException('需要 JDK（不是 JRE）来编译 VerifyScriptTimeout.java')
         }
         def fileManager = compiler.getStandardFileManager(null, null, null)
-        def units = fileManager.getJavaFileObjects(srcFile)
+        def units = fileManager.getJavaFileObjects(srcFile, policyFile)
         def options = [
                 '-classpath', cp,
                 '-d', outDir.absolutePath,

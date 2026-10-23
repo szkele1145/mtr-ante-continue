@@ -83,10 +83,38 @@ public abstract class ScriptHolderBase {
     // [修复 2026-10-21] 审查项 #9：JS 脚本执行超时。
     // 默认 10 秒：正常脚本（render 回调）远小于此值；死循环脚本会被看门狗中断。
     private static final long SCRIPT_TIMEOUT_MILLIS = 10_000L;
-    private static final long SCRIPT_TIMEOUT_NANOS = SCRIPT_TIMEOUT_MILLIS * 1_000_000L;
     // context.interrupt() 的等待时限：脚本线程此刻若不在 polyglot 代码里
     // （卡在 Java 宿主调用），interrupt 会抛 TimeoutException。
     private static final long INTERRUPT_GRACE_MILLIS = 1_000L;
+
+    // ───────────────────────────────────────────────────────────────────────
+    // [continue.7] 脚本执行预算：把「慢脚本」和「死循环」区分开
+    //
+    // 原实现是固定 10s 墙钟超时 ⇒ 一个**合法但很重**的脚本（例如首次构建几何体
+    // 需要 12s）会和死循环一样被砍掉，且日志里两者长得一模一样，无法定位。
+    //
+    // 判据与数值全部在 {@link ScriptBudgetPolicy}（纯函数、零依赖）里，
+    // 由 tools/VerifyScriptTimeout.java 直接调真代码做回归 —— 这里只负责
+    // 采集「成功次数 / 历史最长成功耗时」两个输入。
+    //
+    //   · 从未成功完成过 ⇒ 恒用基础预算 10s（死循环第一次就爆，不放生）
+    //   · 已有成功历史 ⇒ clamp(4 × 历史最长成功耗时, 10s, 60s)
+    // ───────────────────────────────────────────────────────────────────────
+    private static final long SCRIPT_TIMEOUT_MILLIS = ScriptBudgetPolicy.BASE_MILLIS;
+
+    /** 成功完成的次数（写：SCRIPT_THREAD；读：调度看门狗的一方） */
+    private volatile int successfulRuns = 0;
+    /** 历史最长**成功**耗时（纳秒）。失败/被中断的那次不计入，避免死循环把自己抬成「慢」。 */
+    private volatile long maxObservedDurationNanos = 0L;
+
+    /**
+     * 本次调用允许的墙钟预算（毫秒）。
+     *
+     * @see ScriptBudgetPolicy
+     */
+    long effectiveTimeoutMillis() {
+        return ScriptBudgetPolicy.budgetMillis(successfulRuns, maxObservedDurationNanos);
+    }
 
     public void load(
         String name, String contextTypeName, ResourceManager resourceManager, 
@@ -327,6 +355,14 @@ public abstract class ScriptHolderBase {
 
                 failException = null;
                 failTime = 0;
+                // [continue.7] 只把「成功完成」计入慢脚本历史：
+                // 失败/被中断的那次不计入，否则死循环脚本会把自己的超时时长
+                // 当成「历史最长耗时」，从而给自己不断抬预算（自我放生）。
+                final long durationNanos = System.nanoTime() - start;
+                if (durationNanos > maxObservedDurationNanos) {
+                    maxObservedDurationNanos = durationNanos;
+                }
+                successfulRuns++;
             } catch (Exception ex) {
                 Main.LOGGER.error("Error in ANTE Resource Pack JavaScript", ex);
                 failTime = System.currentTimeMillis();
@@ -385,7 +421,11 @@ public abstract class ScriptHolderBase {
      */
     private void startWatchdog(Future<?> task, AbstractScriptContext scriptCtx) {
         final AtomicBoolean interrupted = new AtomicBoolean(false);
-        final long deadline = System.nanoTime() + SCRIPT_TIMEOUT_NANOS;
+        // [continue.7] 预算按该脚本的成功历史自适应；调度前就定死，
+        // 避免执行期间历史变化导致「调度时算一次、判超时时又算一次」的不一致。
+        final long budgetMillis = effectiveTimeoutMillis();
+        final long deadline = System.nanoTime() + budgetMillis * 1_000_000L;
+        final boolean adaptive = budgetMillis > SCRIPT_TIMEOUT_MILLIS;
 
         try {
             WATCHDOG.schedule(() -> {
@@ -397,7 +437,22 @@ public abstract class ScriptHolderBase {
 
                     final Context ctx = context;
                     if (ctx == null) return;
-                    Main.LOGGER.error("ANTE script timed out after {} ms, interrupting execution", SCRIPT_TIMEOUT_MILLIS);
+                    if (adaptive) {
+                        // 「慢脚本」：它成功完成过、且历史耗时接近这个量级 ⇒ 说清楚是可预期行为
+                        Main.LOGGER.error(
+                                "ANTE script is slow: exceeded its adaptive budget of {} ms "
+                                        + "(base {} ms, {} successful runs, longest successful run {} ms), "
+                                        + "interrupting execution",
+                                budgetMillis, SCRIPT_TIMEOUT_MILLIS, successfulRuns,
+                                maxObservedDurationNanos / 1_000_000L);
+                    } else {
+                        // 「疑似死循环」：从未成功完成过 ⇒ 第一句话就给出定性
+                        Main.LOGGER.error(
+                                "ANTE script timed out after {} ms with no successful run on record "
+                                        + "({} completed run(s) so far) - likely an infinite loop, "
+                                        + "interrupting execution",
+                                budgetMillis, successfulRuns);
+                    }
                     try {
                         // interrupt 内部有等待时限：若脚本线程此刻没在 polyglot 代码里
                         // （例如卡在 Java 宿主调用），interrupt 会抛 TimeoutException。
@@ -410,7 +465,7 @@ public abstract class ScriptHolderBase {
                 } catch (Exception e) {
                     Main.LOGGER.error("Error in ANTE script watchdog", e);
                 }
-            }, SCRIPT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+            }, budgetMillis, TimeUnit.MILLISECONDS);
         } catch (Exception e) {
             // 调度失败（如 executor 已关闭）：不影响脚本正常执行
             Main.LOGGER.warn("Failed to schedule ANTE script watchdog: " + e.getMessage());
