@@ -115,6 +115,35 @@ public class RailwayDataMixin implements IPacket {
 				}));
 
 				FriendlyByteBuf packet = new FriendlyByteBuf(Unpooled.buffer());
+				// ★ [continue.8 真机修复] 补齐 YMTR 原生 write_rails 包头。
+				//
+				// 症状 1（单人游戏进存档即「连接已丢失」）：
+				//   Internal Exception: java.lang.IndexOutOfBoundsException:
+				//     readerIndex(0) + length(8) exceeds writerIndex(4)
+				//   at mtr.client.ClientData.writeRails(ClientData.java:117)
+				//
+				// 症状 2（补头后仍「轨道没了、连不上」）：
+				//   头部多写了一个 int ⇒ 客户端把「轨道起点数量」当成头部吃掉，
+				//   之后所有轨道数据错位 4 字节 ⇒ 解析出乱码轨道。
+				//
+				// 根因（YMTR 3.6.4.2 字节码逐条核对，RailwayData.sendRailsInChunks）：
+				//   服务端发的完整序列是
+				//     writeLong(packetIdCounter)   ← 8 字节
+				//     writeInt(A)                  ← 4
+				//     writeInt(B)                  ← 4
+				//     writeInt(C)                  ← 4   ← C 就是「轨道起点数量」
+				//     writeBlockPos(start) / writeInt(size) / writeBlockPos(end) / Rail.writePacket
+				//   客户端 ClientData.writeRails 读的是
+				//     readLong() / readInt() / readInt()   ← 只读 2 个 int 作头部
+				//     然后 readRailsFromPacket()：readInt(数量) / readBlockPos / readInt / readBlockPos / new Rail(buf)
+				//   ⇒ 客户端的第 3 个 int（数量）正是服务端的第 3 个 int（C）。
+				//
+				// 修法：头部 = writeLong + writeInt + writeInt + writeInt(轨道起点数量)，
+				//       共 3 个 int（**不是 4 个**），其后才是 BlockPos 数据。
+				//   A/B 的取值沿用 YMTR 原生空包路径的 (1, 0)。
+				packet.writeLong(0L);
+				packet.writeInt(1);
+				packet.writeInt(0);
 				packet.writeInt(railsToAdd.size());
 				railsToAdd.forEach((posStart, railMap) -> {
 					packet.writeBlockPos(posStart);
